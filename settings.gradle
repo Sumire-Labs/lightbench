@@ -1,10 +1,23 @@
 pluginManagement {
     repositories {
-        jcenter()
         maven {
-            name = 'Fabric'
-            url = 'https://maven.fabricmc.net/'
+            name 'GTNH Maven'
+            url 'https://nexus.gtnewhorizons.com/repository/public/'
+            mavenContent {
+                includeGroup 'com.gtnewhorizons'
+                includeGroup 'com.gtnewhorizons.retrofuturagradle'
+            }
         }
         gradlePluginPortal()
+        mavenCentral()
+        mavenLocal()
     }
 }
+
+plugins {
+    // Automatic toolchain provisioning (fetches Java 8 for Minecraft and Java 25 for the mod).
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+// rootProject.name must be the project dir name (an IntelliJ import quirk).
+rootProject.name = rootProject.projectDir.getName()

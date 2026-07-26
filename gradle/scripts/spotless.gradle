@@ -1,0 +1,43 @@
+apply from: 'gradle/scripts/helpers.gradle'
+apply plugin: 'com.diffplug.spotless'
+
+/*
+ * Spotless — formatting & hygiene. Applied only when use_spotless = true (see build.gradle).
+ * `./gradlew spotlessApply` fixes, `spotlessCheck` (wired into `check`, hence `build` and CI) verifies.
+ *
+ * Formatter: palantir-java-format. Unlike google-java-format it runs cleanly on a JDK 25 daemon
+ * with zero `--add-exports` flags, and it uses a 4-space / 120-column style that matches
+ * .editorconfig. Line endings default to Spotless' GIT_ATTRIBUTES policy (see .gitattributes).
+ */
+spotless {
+    encoding 'UTF-8'
+
+    java {
+        target 'src/*/java/**/*.java'
+        // Never touch generated sources (the RFG Tags class, mixin accessors, etc.) or build output.
+        targetExclude 'build/**', '**/generated/**'
+
+        toggleOffOn()          // // spotless:off ... // spotless:on to opt a block out.
+        removeUnusedImports()
+        importOrder()
+        palantirJavaFormat('2.71.0')
+        formatAnnotations()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+
+    // Build scripts: whitespace hygiene only (no aggressive reformat, to avoid churn).
+    format 'gradleScripts', {
+        target '*.gradle', 'gradle/scripts/*.gradle'
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+
+    // Everything else: JSON / YAML / properties / docs.
+    format 'misc', {
+        target '*.md', 'src/**/resources/**/*.json', '.github/**/*.yml', '.github/**/*.yaml',
+                '*.properties', 'tags.properties', '.gitignore', '.gitattributes', '.editorconfig'
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}

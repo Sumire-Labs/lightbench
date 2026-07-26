@@ -1,88 +1,419 @@
-plugins {
-    id 'fabric-loom' version '1.0-SNAPSHOT'
-    id 'maven-publish'
-}
-
-/*
- * Gets the version name from the latest Git tag
+/**
+ * Pemplate — next-gen Forge 1.12.2 mod template.
+ *
+ * Author the mod in Java 25, build with Gradle 9.6.1 / RetroFuturaGradle 2.0.2, target MixinBooter
+ * 11+, and ship Java 8 bytecode via JVMDowngrader (not Jabel).
+ *
+ * You should not need to edit this file for day-to-day work — configure everything through
+ * gradle.properties. Project-specific tweaks belong in gradle/scripts/extra.gradle.
  */
-// https://stackoverflow.com/questions/28498688/gradle-script-to-autoversion-and-include-the-commit-hash-in-android
-def getGitCommit = { ->
-    def stdout = new ByteArrayOutputStream()
-    exec {
-        commandLine 'git', 'rev-parse', '--short', 'HEAD'
-        standardOutput = stdout
+import com.gtnewhorizons.retrofuturagradle.mcp.InjectTagsTask
+import org.jetbrains.changelog.Changelog
+import org.jetbrains.gradle.ext.Gradle
+
+plugins {
+    id 'java'
+    id 'java-library'
+    id 'maven-publish'
+    id 'org.jetbrains.gradle.plugin.idea-ext' version '1.4.1'
+    id 'com.gtnewhorizons.retrofuturagradle' version '2.0.2'
+    id 'com.matthewprenger.cursegradle' version '1.4.0' apply false
+    id 'com.modrinth.minotaur' version '2.+' apply false
+    id 'org.jetbrains.changelog' version '2.5.0'
+    id 'com.gradleup.shadow' version '9.6.1'
+    id 'com.diffplug.spotless' version '8.8.0' apply false
+    id 'xyz.wagyourtail.jvmdowngrader' version '1.3.6'
+}
+
+apply from: 'gradle/scripts/helpers.gradle'
+
+// ---- Early assertions --------------------------------------------------------------------------
+assertProperty 'mod_version'
+assertProperty 'root_package'
+assertProperty 'mod_id'
+assertProperty 'mod_name'
+
+assertSubProperties 'use_tags', 'tag_class_name'
+assertSubProperties 'use_access_transformer', 'access_transformer_locations'
+assertSubProperties 'use_mixins', 'mixin_booter_version', 'mixin_refmap', 'mixin_loading_method'
+assertSubProperties 'is_coremod', 'coremod_includes_mod', 'coremod_plugin_class_name'
+assertSubProperties 'use_asset_mover', 'asset_mover_version'
+
+// MixinBooter 11+ config-discovery method validation.
+if (propertyBool('use_mixins')) {
+    def loadingMethod = propertyString('mixin_loading_method')
+    if (loadingMethod == 'connector_class' || loadingMethod == 'both') {
+        assertProperty 'mixin_connector_class'
+    } else if (loadingMethod != 'manifest_configs') {
+        throw new GradleException(
+                "Invalid value for 'mixin_loading_method': [${loadingMethod}]. Must be 'manifest_configs', 'connector_class' or 'both'.")
     }
-    return stdout.toString().trim()
 }
 
-sourceCompatibility = JavaVersion.VERSION_17
-targetCompatibility = JavaVersion.VERSION_17
+setDefaultProperty 'java_version', true, '25'
+setDefaultProperty 'use_jetbrains_annotations', false, false
+setDefaultProperty 'generate_sources_jar', true, false
+setDefaultProperty 'generate_javadocs_jar', true, false
+setDefaultProperty 'mapping_channel', true, 'stable'
+setDefaultProperty 'mapping_version', true, '39'
+setDefaultProperty 'use_dependency_at_files', true, true
+setDefaultProperty 'minecraft_username', true, 'Developer'
+setDefaultProperty 'extra_jvm_args', false, ''
+setDefaultProperty 'extra_tweak_classes', false, ''
+setDefaultProperty 'change_minecraft_sources', false, false
+setDefaultProperty 'mixin_loading_method', true, 'manifest_configs'
+setDefaultProperty 'use_spotless', true, true
 
-archivesBaseName = project.archives_base_name
-version = project.mod_version + "+fabric." + getGitCommit()
-group = project.maven_group
+version = propertyString('mod_version')
+group = propertyString('root_package')
 
-dependencies {
-    //to change the versions see the gradle.properties file
-    minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings loom.officialMojangMappings()
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-
-
-    // PSA: Some older mods, compiled on Loom 0.2.1, might have outdated Maven POMs.
-    // You may need to force-disable transitiveness on them.
+base {
+    archivesName.set(propertyString('mod_id'))
 }
 
-processResources {
-    inputs.property "version", project.version
-
-    filesMatching("fabric.mod.json") {
-        expand "version": project.version
+// Example gating — the mixin sources (mixin/**) and their config need the Mixin / MixinExtras API,
+// which is only on the classpath when use_mixins = true. Keep them out of the default build otherwise.
+if (!propertyBool('use_mixins')) {
+    sourceSets.main.java {
+        exclude '**/mixin/**'
+    }
+    sourceSets.main.resources {
+        exclude 'mixins.*.json'
     }
 }
 
-// ensure that the encoding is set to UTF-8, no matter what the system default is
-// this fixes some edge cases with special characters not displaying correctly
-// see http://yodaconditions.net/blog/fix-for-java-file-encoding-problems-with-gradle.html
-tasks.withType(JavaCompile) {
-    options.encoding = "UTF-8"
-}
+// Language version the mod (and its tests) are authored in. JVMDowngrader downgrades the built
+// artifact to Java 8 (see gradle/scripts/downgrade.gradle).
+def modJavaVersion = JavaLanguageVersion.of(propertyString('java_version') as int)
 
-loom {
-    accessWidenerPath = file("src/main/resources/lightbench.accesswidener")
-}
+tasks.decompressDecompiledSources.enabled = !propertyBool('change_minecraft_sources') ||
+        !layout.buildDirectory.dir('rfg/minecraft-src').get().asFile.exists()
 
-// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-// if it is present.
-// If you remove this task, sources will not be generated.
+// ---- Toolchains --------------------------------------------------------------------------------
+// Base toolchain is Java 8: RFG compiles + runs Minecraft 1.12.2 with it (its native runtime).
+// The mod's own compile tasks are bumped to `java_version` further below.
 java {
-    // Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
-    // if it is present.
-    // If you remove this line, sources will not be generated.
-    withSourcesJar()
-}
-jar {
-    from "LICENSE"
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(8))
+        // Azul (Zulu) covers the most platforms for Java 8, crucially including macOS arm64.
+        vendor.set(JvmVendorSpec.AZUL)
+    }
+    if (propertyBool('generate_sources_jar')) {
+        withSourcesJar()
+    }
+    if (propertyBool('generate_javadocs_jar')) {
+        withJavadocJar()
+    }
 }
 
-// configure the maven publication
-publishing {
-    publications {
-        mavenJava(MavenPublication) {
-            // add all the jars that should be included when publishing to maven
-            artifact(remapJar) {
-                builtBy remapJar
-            }
-            artifact(sourcesJar) {
-                builtBy remapSourcesJar
+minecraft {
+    mcVersion.set('1.12.2')
+
+    mcpMappingChannel.set(propertyString('mapping_channel'))
+    mcpMappingVersion.set(propertyString('mapping_version'))
+
+    useDependencyAccessTransformers.set(propertyBool('use_dependency_at_files'))
+
+    username.set(propertyString('minecraft_username'))
+
+    extraTweakClasses.addAll(propertyStringList('extra_tweak_classes'))
+
+    // Runtime JVM arguments. The trailing '...' enables assertions for the whole package tree; without
+    // it, '-ea:com.example' would name a single (non-existent) class and assertions would never fire.
+    def args = ['-ea:' + group + '...']
+    if (propertyBool('use_mixins')) {
+        args << '-Dmixin.hotSwap=true'
+        args << '-Dmixin.checks.interfaces=true'
+        args << '-Dmixin.debug.export=true'
+    }
+    extraRunJvmArguments.addAll(args)
+    extraRunJvmArguments.addAll(propertyStringList('extra_jvm_args'))
+
+    // RFG tag injection: generates a class (tag_class_name) from tags.properties at build time.
+    if (propertyBool('use_tags')) {
+        if (file('tags.properties').exists()) {
+            Properties props = new Properties()
+            file('tags.properties').withInputStream { props.load(it) }
+            if (!props.isEmpty()) {
+                injectedTags.set(props.collectEntries { k, v ->
+                    def interpolated = interpolate(v)
+                    if (interpolated == null || interpolated.isEmpty()) {
+                        throw new GradleException("Empty tag value found for key: $k")
+                    }
+                    [(k): interpolated]
+                })
             }
         }
     }
+}
 
-    // select the repositories you want to publish to
-    repositories {
-        // uncomment to publish to the local maven
-        // mavenLocal()
+repositories {
+    maven {
+        name 'CleanroomMC Maven'
+        url 'https://maven.cleanroommc.com'
     }
 }
+
+dependencies {
+    if (propertyBool('use_jetbrains_annotations')) {
+        compileOnly 'org.jetbrains:annotations:26.1.0'
+    }
+    if (propertyBool('use_asset_mover')) {
+        implementation "com.cleanroommc:assetmover:${propertyString('asset_mover_version')}"
+    }
+    if (propertyBool('use_mixins')) {
+        // MixinBooter 11+: declare the artifact as a normal implementation dependency and a single
+        // annotation-processor entry. MixinBooter 11's AP bundles ASM/Guava/Gson itself — you no
+        // longer declare those yourself (unlike MixinBooter 10.x).
+        String mixin = modUtils.enableMixins("zone.rong:mixinbooter:${propertyString('mixin_booter_version')}", propertyString('mixin_refmap'))
+        implementation (mixin) {
+            transitive = false
+        }
+        annotationProcessor mixin
+    }
+    if (propertyBool('enable_junit_testing')) {
+        testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+}
+
+apply from: 'gradle/scripts/dependencies.gradle'
+if (propertyBool('use_spotless')) {
+    apply from: 'gradle/scripts/spotless.gradle'
+}
+apply from: 'gradle/scripts/downgrade.gradle'
+
+// ---- Access Transformers -----------------------------------------------------------------------
+if (propertyBool('use_access_transformer')) {
+    for (def location : propertyStringList('access_transformer_locations')) {
+        def fileLocation = file("${projectDir}/src/main/resources/${location}")
+        if (fileLocation.exists()) {
+            tasks.deobfuscateMergedJarToSrg.accessTransformerFiles.from(fileLocation)
+            tasks.srgifyBinpatchedJar.accessTransformerFiles.from(fileLocation)
+        } else {
+            throw new GradleException("Access Transformer file [$fileLocation] does not exist!")
+        }
+    }
+}
+
+processResources {
+    inputs.property 'mod_id', propertyString('mod_id')
+    inputs.property 'mod_name', propertyString('mod_name')
+    inputs.property 'mod_version', propertyString('mod_version')
+    inputs.property 'mod_description', propertyString('mod_description')
+    inputs.property 'mod_authors', "${propertyStringList('mod_authors', ',').join(', ')}"
+    inputs.property 'mod_credits', propertyString('mod_credits')
+    inputs.property 'mod_url', propertyString('mod_url')
+    inputs.property 'mod_update_json', propertyString('mod_update_json')
+    inputs.property 'mod_logo_path', propertyString('mod_logo_path')
+    inputs.property 'mixin_refmap', propertyString('mixin_refmap')
+    inputs.property 'mixin_configs', propertyStringList('mixin_configs').join(' ')
+
+    def filterList = ['mcmod.info', 'pack.mcmeta']
+    filterList.addAll(propertyStringList('mixin_configs').collect(config -> "mixins.${config}.json" as String))
+
+    filesMatching(filterList) { fcd ->
+        fcd.expand(
+                'mod_id': propertyString('mod_id'),
+                'mod_name': propertyString('mod_name'),
+                'mod_version': propertyString('mod_version'),
+                'mod_description': propertyString('mod_description'),
+                'mod_authors': "${propertyStringList('mod_authors', ',').join(', ')}",
+                'mod_credits': propertyString('mod_credits'),
+                'mod_url': propertyString('mod_url'),
+                'mod_update_json': propertyString('mod_update_json'),
+                'mod_logo_path': propertyString('mod_logo_path'),
+                'mixin_refmap': propertyString('mixin_refmap'),
+                'mixin_package': "${propertyString('root_package')}.${propertyString('mod_id')}.mixin"
+        )
+    }
+
+    if (propertyBool('use_access_transformer')) {
+        rename '(.+_at.cfg)', 'META-INF/$1'
+    }
+}
+
+// ---- Jar manifest ------------------------------------------------------------------------------
+jar {
+    manifest {
+        def attribute_map = [:]
+        if (propertyBool('is_coremod')) {
+            attribute_map['FMLCorePlugin'] = propertyString('coremod_plugin_class_name')
+            if (propertyBool('coremod_includes_mod')) {
+                attribute_map['FMLCorePluginContainsFMLMod'] = true
+                // Check the whole requested-task set (and qualified paths like ':build'), not just the
+                // first token — otherwise 'clean build' or 'spotlessApply build' would silently drop this.
+                def obfTasks = ['build', 'prepareObfModsFolder', 'runObfClient']
+                if (gradle.startParameter.taskNames.any { t -> obfTasks.any { t == it || t.endsWith(':' + it) } }) {
+                    attribute_map['ForceLoadAsMod'] = true
+                }
+            }
+        }
+        if (propertyBool('use_access_transformer')) {
+            attribute_map['FMLAT'] = propertyString('access_transformer_locations')
+        }
+        if (propertyBool('use_mixins')) {
+            def loadingMethod = propertyString('mixin_loading_method')
+            if (loadingMethod == 'manifest_configs' || loadingMethod == 'both') {
+                def mixinList = propertyStringList('mixin_configs').collect { "mixins.${it}.json" }.join(' ')
+                if (!mixinList.isEmpty()) {
+                    attribute_map['MixinConfigs'] = mixinList
+                }
+            }
+            if (loadingMethod == 'connector_class' || loadingMethod == 'both') {
+                attribute_map['MixinConnector'] = propertyString('mixin_connector_class')
+            }
+        }
+        attributes(attribute_map)
+    }
+}
+
+// ---- IDE (IntelliJ IDEA) -----------------------------------------------------------------------
+idea {
+    module {
+        inheritOutputDirs = true
+    }
+    project {
+        settings {
+            runConfigurations {
+                "0. Setup Decomp Workspace"(Gradle) {
+                    taskNames = ["setupDecompWorkspace"]
+                }
+                "1. Run Client"(Gradle) {
+                    taskNames = ["runClient"]
+                }
+                "2. Run Server"(Gradle) {
+                    taskNames = ["runServer"]
+                }
+                "3. Run Obfuscated Client"(Gradle) {
+                    taskNames = ["runObfClient"]
+                }
+                "4. Run Obfuscated Server"(Gradle) {
+                    taskNames = ["runObfServer"]
+                }
+            }
+            compiler.javac {
+                afterEvaluate {
+                    javacAdditionalOptions = "-encoding utf8"
+                    moduleJavacAdditionalOptions = [
+                            (project.name + ".main"): tasks.compileJava.options.compilerArgs.collect { '"' + it + '"' }.join(' ')
+                    ]
+                }
+            }
+        }
+    }
+}
+
+// ---- Compilation: author the mod & tests in `java_version`, keep Minecraft on Java 8 -----------
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // Leave RFG's Minecraft compile tasks on the base (Java 8) toolchain — decompiled MC is Java 8.
+    if (it.name in ['compileMcLauncherJava', 'compilePatchedMcJava']) {
+        return
+    }
+    javaCompiler.set(javaToolchains.compilerFor {
+        languageVersion.set(modJavaVersion)
+        vendor.set(JvmVendorSpec.AZUL)
+    })
+    // Real `java_version` bytecode — no `--release 8` clamp. JVMDowngrader lowers it to 8 afterwards.
+    sourceCompatibility = propertyString('java_version')
+    targetCompatibility = propertyString('java_version')
+}
+
+tasks.withType(Javadoc).configureEach {
+    options.encoding = 'UTF-8'
+    javadocTool.set(javaToolchains.javadocToolFor {
+        languageVersion.set(modJavaVersion)
+        vendor.set(JvmVendorSpec.AZUL)
+    })
+}
+
+test {
+    useJUnitPlatform()
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion.set(modJavaVersion)
+        vendor.set(JvmVendorSpec.AZUL)
+    })
+    if (propertyBool('show_testing_output')) {
+        testLogging {
+            showStandardStreams = true
+        }
+    }
+}
+
+String parserChangelog() {
+    if (!file('CHANGELOG.md').exists()) {
+        throw new GradleException('publish_with_changelog is true, but CHANGELOG.md does not exist in the workspace!')
+    }
+    // getOrNull (not get, which throws MissingVersionException) so a missing section yields a clear,
+    // actionable error instead of a raw stack trace at configuration time.
+    def item = changelog.getOrNull(propertyString('mod_version'))
+    if (item == null) {
+        throw new GradleException("publish_with_changelog is true, but CHANGELOG.md has no section for version "
+                + "${propertyString('mod_version')}! Add a '## [${propertyString('mod_version')}]' heading, "
+                + "or set publish_with_changelog = false.")
+    }
+    String parsedChangelog = changelog.renderItem(
+            item.withHeader(false).withEmptySections(false),
+            Changelog.OutputType.MARKDOWN)
+    if (parsedChangelog.isEmpty()) {
+        throw new GradleException('publish_with_changelog is true, but the changelog for the latest version is empty!')
+    }
+    return parsedChangelog
+}
+
+// ---- Mixin config scaffolding ------------------------------------------------------------------
+tasks.register('generateMixinJson') {
+    group 'pemplate helpers'
+    def missingConfig = propertyStringList('mixin_configs').findAll(config -> !file("src/main/resources/mixins.${config}.json").exists())
+    onlyIf {
+        if (propertyBool('use_mixins') && propertyBool('generate_mixins_json')) {
+            return !missingConfig.empty
+        }
+        return false
+    }
+    doLast {
+        for (String mixinConfig : missingConfig) {
+            def target = file("src/main/resources/mixins.${mixinConfig}.json")
+            target << """{\n  "required": true,\n  "package": "${propertyString('root_package')}.${propertyString('mod_id')}.mixin",\n  "refmap": "${propertyString('mixin_refmap')}",\n  "compatibilityLevel": "JAVA_8",\n  "minVersion": "0.8",\n  "target": "@env(DEFAULT)",\n  "mixins": [],\n  "injectors": {\n    "maxShiftBy": 10\n  }\n}\n"""
+        }
+    }
+}
+
+// ---- RFG tag injection -------------------------------------------------------------------------
+tasks.named('injectTags', InjectTagsTask).configure {
+    onlyIf {
+        return propertyBool('use_tags') && !it.getTags().get().isEmpty()
+    }
+    it.outputClassName.set(propertyString('tag_class_name'))
+}
+
+tasks.register('pemplateAfterSync') {
+    group 'pemplate helpers'
+    dependsOn 'injectTags', 'generateMixinJson'
+}
+
+idea.project.settings {
+    taskTriggers {
+        afterSync 'pemplateAfterSync'
+    }
+}
+
+// ---- Coremod load order in the obfuscated dev run ----------------------------------------------
+tasks.named('prepareObfModsFolder').configure {
+    finalizedBy 'prioritizeCoremods'
+}
+
+tasks.register('prioritizeCoremods') {
+    dependsOn 'prepareObfModsFolder'
+    doLast {
+        fileTree('run/obfuscated').forEach {
+            if (it.isFile() && it.name =~ '(mixinbooter|configanytime)(-)([0-9])+\\.+([0-9])+(.jar)') {
+                it.renameTo(new File(it.parentFile, "!${it.name}"))
+            }
+        }
+    }
+}
+
+apply from: 'gradle/scripts/publishing.gradle'
+apply from: 'gradle/scripts/extra.gradle'

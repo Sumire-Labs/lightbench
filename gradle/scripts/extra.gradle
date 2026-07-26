@@ -1,0 +1,11 @@
+apply from: 'gradle/scripts/helpers.gradle'
+
+/*
+ * Applied last. Put project-specific customisations here so build.gradle stays clean:
+ *   - extra Gradle tasks
+ *   - custom Jar artifacts (see the note in publishing.gradle)
+ *   - additional run configurations / dependencies wiring
+ *   - anything you don't want to lose when updating the template's build.gradle
+ *
+ * Helper functions (propertyString/propertyBool/propertyStringList/interpolate/...) are available.
+ */

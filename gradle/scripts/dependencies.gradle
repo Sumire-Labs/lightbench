@@ -1,0 +1,81 @@
+apply from: 'gradle/scripts/helpers.gradle'
+
+repositories {
+    // CleanroomMC maven is added in build.gradle. A couple more, scoped so they only serve their
+    // own groups (faster resolution, fewer surprises):
+    exclusiveContent {
+        forRepository {
+            maven {
+                name 'CleanroomMC CurseMaven'
+                url 'https://curse.cleanroommc.com'
+            }
+        }
+        filter {
+            includeGroup 'curse.maven'
+        }
+    }
+    exclusiveContent {
+        forRepository {
+            maven {
+                name 'Modrinth'
+                url 'https://api.modrinth.com/maven'
+            }
+        }
+        filter {
+            includeGroup 'maven.modrinth'
+        }
+    }
+    mavenLocal() // Must be last for caching to work.
+}
+
+configurations {
+    shade
+    implementation.extendsFrom shade
+}
+
+dependencies {
+    // ---- Dev-env quality-of-life mods (NOT shipped in your jar) --------------------------------
+    // StripLatestForgeRequirements lets mods that demand a newer Forge load in the dev env.
+    runtimeOnly 'com.cleanroommc:strip-latest-forge-requirements:1.0'
+    // OSXNarratorBlocker prevents a startup crash on Apple-silicon Macs.
+    runtimeOnly 'com.cleanroommc:osxnarratorblocker:1.0'
+
+    // ---- MixinBooter 11+ in the dev env -------------------------------------------------------
+    // The two helper mods above transitively depend on an OLD MixinBooter, which would otherwise
+    // shadow the modern one at dev runtime. We provide MixinBooter 11+ explicitly at runtime and
+    // force the configured version everywhere (below) so the dev env always boots it, whether or
+    // not `use_mixins` is on. This is more robust than stripping the helpers' transitives.
+    runtimeOnly "zone.rong:mixinbooter:${propertyString('mixin_booter_version')}"
+
+    // ---- Examples (delete or adapt) -----------------------------------------------------------
+    // Dependency descriptor:  'group:name:version[:classifier]'
+    //   implementation 'com.google.code.gson:gson:2.8.6'          // compile + runtime
+    //   compileOnly    'com.google.code.gson:gson:2.8.6'          // compile only
+    //   runtimeOnly    'com.google.code.gson:gson:2.8.6'          // runtime only
+    // Deobfuscate a dependency (RFG remaps it with your mapping_channel/version):
+    //   implementation rfg.deobf('curse.maven:had-enough-items-557549:4543375')
+    // Shade a dependency into your output jar (via the `shade` configuration):
+    //   shade 'com.example:library:1.2.3'
+    // CurseMaven:  'curse.maven:<slug>-<projectId>:<fileId>'      (https://cursemaven.com)
+    // Modrinth:    'maven.modrinth:<slug>:<versionId>'            (https://docs.modrinth.com)
+    // Exclude transitive dependencies with a closure:
+    //   implementation('com.example:library:1.2.3') { transitive = false }
+}
+
+// Keep the whole dev env on the configured MixinBooter 11+ version (see note above).
+configurations.configureEach {
+    resolutionStrategy {
+        force "zone.rong:mixinbooter:${propertyString('mixin_booter_version')}"
+    }
+}
+
+// Shading of YOUR dependencies (the `shade` configuration) is done by the shadow plugin. The
+// downgrade + reobf chain (gradle/scripts/downgrade.gradle) consumes shadowJar when it is active.
+// Uberdev = a dev jar bundling the shaded deps; it is NOT the reobfuscated artifact.
+tasks.shadowJar {
+    // Shadow wires shadowJar into assemble, so it would run even with nothing to shade — disable it
+    // in that case so the plain `jar` feeds the downgrader instead.
+    enabled = !project.configurations.shade.dependencies.empty
+    archiveClassifier = 'uberdev'
+    configurations = [ project.configurations.shade ]
+}

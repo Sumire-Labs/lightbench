@@ -1,0 +1,20 @@
+# Normalise line endings: force LF in the repo for text files.
+* text=auto eol=lf
+
+# Windows batch/cmd scripts must stay CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# The Gradle wrapper.
+gradlew        text eol=lf
+gradlew.bat    text eol=crlf
+gradle/wrapper/gradle-wrapper.jar binary
+
+# Binary assets.
+*.png binary
+*.jar binary
+*.zip binary
+*.ogg binary
+
+# Keep generated/vendored files out of language stats & diffs where noisy.
+gradle/wrapper/** linguist-vendored

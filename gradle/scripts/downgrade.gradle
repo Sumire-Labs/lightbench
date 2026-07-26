@@ -1,0 +1,54 @@
+apply from: 'gradle/scripts/helpers.gradle'
+
+/*
+ * JVMDowngrader (JVMDG) — the modern replacement for Jabel.
+ *
+ * Jabel only tricks javac into accepting newer *syntax* while emitting Java 8 bytecode; it cannot
+ * use newer JDK *APIs*. JVMDowngrader rewrites the compiled bytecode down to Java 8 AND shades in
+ * small runtime stubs for the newer JDK APIs you use, so you can author the mod in real Java 25.
+ *
+ * Build pipeline:
+ *     compileJava (java_version)
+ *         -> jar               (dev jar, correct manifest)
+ *         -> [shadowJar]       (only when the `shade` configuration is non-empty)
+ *         -> downgradeJar      (rewrites bytecode to Java 8)
+ *         -> shadeDowngradedApi(inlines the JDK-API stubs -> self-contained jar)
+ *         -> reobfJar          (RFG remaps MCP -> SRG/notch; PRIMARY published artifact)
+ *
+ * Downgrading BEFORE reobf keeps RFG operating on the Java 8 bytecode it is battle-tested on, and
+ * leaves the mixin refmap handling entirely inside RFG's native flow.
+ */
+
+jvmdg {
+    downgradeTo = JavaVersion.VERSION_1_8
+}
+
+// Feed the downgrader from shadowJar when shading is active, otherwise straight from the dev jar.
+def shadeActive = !configurations.shade.dependencies.empty
+def downgradeSource = shadeActive ? tasks.named('shadowJar') : tasks.named('jar')
+
+tasks.named('downgradeJar') {
+    downgradeTo = JavaVersion.VERSION_1_8
+    inputFile.set(downgradeSource.flatMap { it.archiveFile })
+    // Preserve the coremod / mixin / AT manifest attributes produced by the `jar` task.
+    manifest.from(tasks.jar.manifest)
+    archiveClassifier.set('downgraded')
+    destinationDirectory.set(layout.buildDirectory.dir('downgrade'))
+}
+
+tasks.named('shadeDowngradedApi') {
+    downgradeTo = JavaVersion.VERSION_1_8
+    manifest.from(tasks.jar.manifest)
+    archiveClassifier.set('downgraded-shaded')
+    destinationDirectory.set(layout.buildDirectory.dir('downgrade'))
+}
+
+// RFG reobfuscates the FINAL, downgraded + api-shaded jar. reobfJar remains the primary artifact.
+tasks.named('reobfJar').configure {
+    inputJar.set(tasks.named('shadeDowngradedApi').flatMap { it.archiveFile })
+}
+
+// Ensure the full chain runs for `build` / `assemble`.
+tasks.named('assemble').configure {
+    dependsOn 'reobfJar'
+}
