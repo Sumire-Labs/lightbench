@@ -57,6 +57,10 @@ public final class TpsTest {
     private boolean armed; // skip the (partial) tick the run was started in
     private final long cpuBefore;
     private long opsDone;
+    // Slow engines can take seconds per tick, so a pure tick-count budget
+    // would run for ages. Whatever comes first ends the run: the tick cap
+    // or 3x the requested seconds of wall time.
+    private long wallDeadline;
 
     private TpsTest(final ICommandSender sender, final World world, final LightProbe probe,
                     final int editsPerTick, final int seconds, final int baseX, final int baseZ, final int size) {
@@ -79,15 +83,30 @@ public final class TpsTest {
     public static void start(final ICommandSender sender, final World world,
                              final int editsPerTick, final int seconds,
                              final int baseX, final int baseZ, final int size) throws Exception {
+        start(sender, world, editsPerTick, seconds, baseX, baseZ, size, true);
+    }
+
+    private static void start(final ICommandSender sender, final World world,
+                              final int editsPerTick, final int seconds,
+                              final int baseX, final int baseZ, final int size,
+                              final boolean prep) throws Exception {
         final LightProbe probe = LightProbe.create(world);
         say(sender, String.format(Locale.ROOT,
                 "engine: %s | tps test: %d edits/tick for %ds (platform %dx%d at y=254)",
                 probe.engine().name().toLowerCase(Locale.ROOT), editsPerTick, seconds, size, size));
-        prepPlatform(world, probe, baseX, baseZ, size);
+        if (prep) {
+            prepPlatform(world, probe, baseX, baseZ, size);
+        }
         active = new TpsTest(sender, world, probe, editsPerTick, seconds, baseX, baseZ, size);
     }
 
-    /** Queue a ladder of runs executed back to back on the same platform. */
+    /**
+     * Queue a ladder of runs executed back to back on the same platform.
+     * The platform is rebuilt once up front only: every engine runs the same
+     * seeded ladder, so the platform state entering step N is identical
+     * across engines and rebuilding between steps (minutes of setBlockState
+     * on slow engines) would add nothing but wall time.
+     */
     public static void startSweep(final ICommandSender sender, final World world,
                                   final int seconds, final int[] ladder,
                                   final int baseX, final int baseZ, final int size) throws Exception {
@@ -95,13 +114,14 @@ public final class TpsTest {
             queue.add(new int[]{k, seconds, baseX, baseZ, size});
         }
         say(sender, "tps sweep: ladder " + Arrays.toString(ladder) + ", " + seconds + "s each");
+        prepPlatform(world, LightProbe.create(world), baseX, baseZ, size);
         startNext(sender, world);
     }
 
     private static void startNext(final ICommandSender sender, final World world) throws Exception {
         final int[] next = queue.poll();
         if (next != null) {
-            start(sender, world, next[0], next[1], next[2], next[3], next[4]);
+            start(sender, world, next[0], next[1], next[2], next[3], next[4], false);
         }
     }
 
@@ -146,6 +166,9 @@ public final class TpsTest {
     }
 
     private void tick() {
+        if (this.wallDeadline == 0) {
+            this.wallDeadline = System.nanoTime() + this.tickNanos.length / 20L * 3_000_000_000L;
+        }
         for (int i = 0; i < this.editsPerTick; ++i) {
             final int x = this.baseX + 4 + this.rng.nextInt(this.size - 8);
             final int z = this.baseZ + 4 + this.rng.nextInt(this.size - 8);
@@ -155,7 +178,7 @@ public final class TpsTest {
         }
         this.opsDone += this.editsPerTick;
         this.tickNanos[this.tickIndex++] = System.nanoTime() - this.tickStart;
-        if (this.tickIndex == this.tickNanos.length) {
+        if (this.tickIndex == this.tickNanos.length || System.nanoTime() > this.wallDeadline) {
             finish();
         }
     }
@@ -166,7 +189,12 @@ public final class TpsTest {
             final long drain = this.probe.drainLight();
             final long cpuAfter = this.cpuBefore >= 0 ? LightProbe.pulsarWorkerCpuNanos() : -1;
 
-            final long[] sorted = this.tickNanos.clone();
+            if (this.tickIndex < this.tickNanos.length) {
+                say(this.sender, String.format(Locale.ROOT,
+                        "tps %d edits/tick: wall-capped after %d ticks (engine too slow for the full %d)",
+                        this.editsPerTick, this.tickIndex, this.tickNanos.length));
+            }
+            final long[] sorted = Arrays.copyOf(this.tickNanos, this.tickIndex);
             Arrays.sort(sorted);
             final double avgMs = Arrays.stream(sorted).sum() / (double) sorted.length * 1.0e-6;
             int over50 = 0;
