@@ -35,7 +35,8 @@ public class CommandLightbench extends CommandBase {
 
     @Override
     public String getUsage(final ICommandSender sender) {
-        return "/lightbench [radius] [warmupRadius] | /lightbench edits [size] [reps]";
+        return "/lightbench [radius] [warmupRadius] | /lightbench edits [size] [reps]"
+                + " | /lightbench tps <editsPerTick> [seconds] | /lightbench tps sweep [seconds]";
     }
 
     @Override
@@ -49,6 +50,26 @@ public class CommandLightbench extends CommandBase {
         final LightProbe probe = LightProbe.create(world);
 
         try {
+            if (args.length > 0 && "tps".equals(args[0])) {
+                if (TpsTest.isRunning()) {
+                    say(sender, "a tps run is already in progress");
+                    return;
+                }
+                final int size = 64;
+                final int baseX = EDITS_CENTER_X - size / 2;
+                final int baseZ = EDITS_CENTER_Z - size / 2;
+                if (args.length > 1 && "sweep".equals(args[1])) {
+                    final int seconds = args.length > 2 ? parseInt(args[2], 5, 120) : 20;
+                    TpsTest.startSweep(sender, world, seconds,
+                            new int[]{64, 128, 256, 512, 1024, 2048}, baseX, baseZ, size);
+                } else {
+                    final int editsPerTick = args.length > 1 ? parseInt(args[1], 1, 100000) : 256;
+                    final int seconds = args.length > 2 ? parseInt(args[2], 5, 600) : 20;
+                    TpsTest.start(sender, world, editsPerTick, seconds, baseX, baseZ, size);
+                }
+                return;
+            }
+
             if (args.length > 0 && "edits".equals(args[0])) {
                 final int size = args.length > 1 ? parseInt(args[1], 8, 128) : 64;
                 final int reps = args.length > 2 ? parseInt(args[2], 1, 500) : 50;

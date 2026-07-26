@@ -2,6 +2,8 @@ package com.sumirelabs.lightbench;
 
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLServerStartingEvent;
+import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
+import net.minecraftforge.fml.common.gameevent.TickEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -39,5 +41,19 @@ public class Lightbench {
     @Mod.EventHandler
     public void serverStarting(final FMLServerStartingEvent event) {
         event.registerServerCommand(new CommandLightbench());
+    }
+
+    /** Drives {@link TpsTest}: brackets each server tick's work window. */
+    @Mod.EventBusSubscriber(modid = Tags.ID)
+    public static class TickHandler {
+
+        @SubscribeEvent
+        public static void onServerTick(final TickEvent.ServerTickEvent event) {
+            if (event.phase == TickEvent.Phase.START) {
+                TpsTest.onTickStart();
+            } else {
+                TpsTest.onTickEnd();
+            }
+        }
     }
 }
