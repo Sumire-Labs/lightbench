@@ -1,0 +1,55 @@
+name: Build
+
+# Single push trigger: every branch push builds exactly once (no pull_request trigger, so
+# same-repo branches — including dependabot's — never build twice). Note: fork PRs get no CI
+# with this style. The branches filter deliberately excludes tag pushes — release.yml owns tags.
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+# Least privilege: building and uploading a workflow artifact only needs read access.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The Gradle daemon runs on JDK 25 (required by RetroFuturaGradle 2.0.2). The Java 8 toolchain
+      # for Minecraft is auto-provisioned by the foojay resolver
+      # (org.gradle.java.installations.auto-download=true).
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'zulu'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Also cache ~/.gradle/jdks — the foojay-provisioned Java 8 (Zulu) toolchain lives there,
+          # and the action's default cache only covers caches/ and notifications/. Without this the
+          # JDK is re-downloaded on every run.
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
+
+      # Safety net: wrappers (re)generated on Windows can lose the executable bit in git.
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build
+        run: ./gradlew build --stacktrace
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-libs
+          path: build/libs/*.jar
+          if-no-files-found: warn

@@ -1,0 +1,68 @@
+name: Release
+
+# Tag-driven release. Push a version tag (e.g. `1.2.3` or `v1.2.3`) and this workflow builds that
+# version and publishes a GitHub Release with the jars attached.
+#
+# Unlike a plain "build on tag", the tag is *used*: it is injected as `mod_version`, so the built
+# jar and the generated Tags class carry the tag's version — no need to bump gradle.properties and
+# tag in two places.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"        # 1.2.3
+      - "[0-9]+.[0-9]+.[0-9]+-*"      # 1.2.3-beta.1  (SemVer pre-release)
+      - "v[0-9]+.[0-9]+.[0-9]+"       # v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-*"     # v1.2.3-beta.1
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          java-version: '25'
+          distribution: 'zulu'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          # Also cache the foojay-provisioned Java 8 toolchain (see build.yml).
+          gradle-home-cache-includes: |
+            caches
+            notifications
+            jdks
+
+      - name: Derive version from tag
+        id: version
+        # Strip an optional leading "v" so both `1.2.3` and `v1.2.3` yield `1.2.3`.
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Safety net: wrappers (re)generated on Windows can lose the executable bit in git.
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build ${{ steps.version.outputs.version }}
+        run: ./gradlew build -Pmod_version=${{ steps.version.outputs.version }} --stacktrace
+
+      # The plain `jar` output (…-dev.jar) is Java-`java_version` bytecode with dev (MCP) mappings — it
+      # is neither downgraded nor reobfuscated and cannot load on a 1.12.2 (Java 8) client. Keep it out
+      # of the public Release; the shippable reobfuscated jar (and the sources jar) remain.
+      - name: Remove non-shippable dev jar
+        run: rm -f build/libs/*-dev.jar
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1.21.0
+        with:
+          name: ${{ steps.version.outputs.version }}
+          artifacts: "build/libs/*.jar"
+          generateReleaseNotes: true
+          draft: false
+          # Tags containing a hyphen (SemVer pre-releases) are marked as pre-releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
