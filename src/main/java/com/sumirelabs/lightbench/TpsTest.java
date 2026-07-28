@@ -128,9 +128,10 @@ public final class TpsTest {
     /**
      * Rebuild the platform to full stone and let light settle, so every run
      * starts from the same state regardless of what earlier runs toggled.
+     * Package-private: {@link SpikeTest} preps the identical platform.
      */
-    private static void prepPlatform(final World world, final LightProbe probe,
-                                     final int baseX, final int baseZ, final int size) throws Exception {
+    static void prepPlatform(final World world, final LightProbe probe,
+                             final int baseX, final int baseZ, final int size) throws Exception {
         for (int cx = (baseX >> 4) - 1; cx <= ((baseX + size) >> 4) + 1; ++cx) {
             for (int cz = (baseZ >> 4) - 1; cz <= ((baseZ + size) >> 4) + 1; ++cz) {
                 world.getChunkProvider().provideChunk(cx, cz);

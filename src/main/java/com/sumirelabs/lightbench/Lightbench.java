@@ -43,7 +43,7 @@ public class Lightbench {
         event.registerServerCommand(new CommandLightbench());
     }
 
-    /** Drives {@link TpsTest}: brackets each server tick's work window. */
+    /** Drives {@link TpsTest} and {@link SpikeTest}: brackets each server tick's work window. */
     @Mod.EventBusSubscriber(modid = Tags.ID)
     public static class TickHandler {
 
@@ -51,8 +51,10 @@ public class Lightbench {
         public static void onServerTick(final TickEvent.ServerTickEvent event) {
             if (event.phase == TickEvent.Phase.START) {
                 TpsTest.onTickStart();
+                SpikeTest.onTickStart();
             } else {
                 TpsTest.onTickEnd();
+                SpikeTest.onTickEnd();
             }
         }
     }

@@ -36,7 +36,8 @@ public class CommandLightbench extends CommandBase {
     @Override
     public String getUsage(final ICommandSender sender) {
         return "/lightbench [radius] [warmupRadius] | /lightbench edits [size] [reps]"
-                + " | /lightbench tps <editsPerTick> [seconds] | /lightbench tps sweep [seconds]";
+                + " | /lightbench tps <editsPerTick> [seconds] | /lightbench tps sweep [seconds]"
+                + " | /lightbench spikes [editsPerSec] [seconds]";
     }
 
     @Override
@@ -50,9 +51,22 @@ public class CommandLightbench extends CommandBase {
         final LightProbe probe = LightProbe.create(world);
 
         try {
+            if (args.length > 0 && "spikes".equals(args[0])) {
+                if (TpsTest.isRunning() || SpikeTest.isRunning()) {
+                    say(sender, "a tick-measured run is already in progress");
+                    return;
+                }
+                final int size = 64;
+                final int editsPerSec = args.length > 1 ? parseInt(args[1], 1, 20) : 2;
+                final int seconds = args.length > 2 ? parseInt(args[2], 10, 600) : 60;
+                SpikeTest.start(sender, world, editsPerSec, seconds,
+                        EDITS_CENTER_X - size / 2, EDITS_CENTER_Z - size / 2, size);
+                return;
+            }
+
             if (args.length > 0 && "tps".equals(args[0])) {
-                if (TpsTest.isRunning()) {
-                    say(sender, "a tps run is already in progress");
+                if (TpsTest.isRunning() || SpikeTest.isRunning()) {
+                    say(sender, "a tick-measured run is already in progress");
                     return;
                 }
                 final int size = 64;
