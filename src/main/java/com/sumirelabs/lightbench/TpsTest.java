@@ -1,16 +1,15 @@
 package com.sumirelabs.lightbench;
 
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Random;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.command.ICommandSender;
 import net.minecraft.init.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraft.world.World;
-
-import java.util.ArrayDeque;
-import java.util.Arrays;
-import java.util.Locale;
-import java.util.Random;
 
 /**
  * Sustained-edit-load MSPT benchmark ("tps mode").
@@ -62,8 +61,15 @@ public final class TpsTest {
     // or 3x the requested seconds of wall time.
     private long wallDeadline;
 
-    private TpsTest(final ICommandSender sender, final World world, final LightProbe probe,
-                    final int editsPerTick, final int seconds, final int baseX, final int baseZ, final int size) {
+    private TpsTest(
+            final ICommandSender sender,
+            final World world,
+            final LightProbe probe,
+            final int editsPerTick,
+            final int seconds,
+            final int baseX,
+            final int baseZ,
+            final int size) {
         this.sender = sender;
         this.world = world;
         this.probe = probe;
@@ -80,20 +86,39 @@ public final class TpsTest {
     }
 
     /** Queue a single run. Platform prep happens synchronously here (untimed). */
-    public static void start(final ICommandSender sender, final World world,
-                             final int editsPerTick, final int seconds,
-                             final int baseX, final int baseZ, final int size) throws Exception {
+    public static void start(
+            final ICommandSender sender,
+            final World world,
+            final int editsPerTick,
+            final int seconds,
+            final int baseX,
+            final int baseZ,
+            final int size)
+            throws Exception {
         start(sender, world, editsPerTick, seconds, baseX, baseZ, size, true);
     }
 
-    private static void start(final ICommandSender sender, final World world,
-                              final int editsPerTick, final int seconds,
-                              final int baseX, final int baseZ, final int size,
-                              final boolean prep) throws Exception {
+    private static void start(
+            final ICommandSender sender,
+            final World world,
+            final int editsPerTick,
+            final int seconds,
+            final int baseX,
+            final int baseZ,
+            final int size,
+            final boolean prep)
+            throws Exception {
         final LightProbe probe = LightProbe.create(world);
-        say(sender, String.format(Locale.ROOT,
-                "engine: %s | tps test: %d edits/tick for %ds (platform %dx%d at y=254)",
-                probe.engine().name().toLowerCase(Locale.ROOT), editsPerTick, seconds, size, size));
+        say(
+                sender,
+                String.format(
+                        Locale.ROOT,
+                        "engine: %s | tps test: %d edits/tick for %ds (platform %dx%d at y=254)",
+                        probe.engine().name().toLowerCase(Locale.ROOT),
+                        editsPerTick,
+                        seconds,
+                        size,
+                        size));
         if (prep) {
             prepPlatform(world, probe, baseX, baseZ, size);
         }
@@ -107,11 +132,17 @@ public final class TpsTest {
      * across engines and rebuilding between steps (minutes of setBlockState
      * on slow engines) would add nothing but wall time.
      */
-    public static void startSweep(final ICommandSender sender, final World world,
-                                  final int seconds, final int[] ladder,
-                                  final int baseX, final int baseZ, final int size) throws Exception {
+    public static void startSweep(
+            final ICommandSender sender,
+            final World world,
+            final int seconds,
+            final int[] ladder,
+            final int baseX,
+            final int baseZ,
+            final int size)
+            throws Exception {
         for (final int k : ladder) {
-            queue.add(new int[]{k, seconds, baseX, baseZ, size});
+            queue.add(new int[] {k, seconds, baseX, baseZ, size});
         }
         say(sender, "tps sweep: ladder " + Arrays.toString(ladder) + ", " + seconds + "s each");
         prepPlatform(world, LightProbe.create(world), baseX, baseZ, size);
@@ -130,8 +161,9 @@ public final class TpsTest {
      * starts from the same state regardless of what earlier runs toggled.
      * Package-private: {@link SpikeTest} preps the identical platform.
      */
-    static void prepPlatform(final World world, final LightProbe probe,
-                             final int baseX, final int baseZ, final int size) throws Exception {
+    static void prepPlatform(
+            final World world, final LightProbe probe, final int baseX, final int baseZ, final int size)
+            throws Exception {
         for (int cx = (baseX >> 4) - 1; cx <= ((baseX + size) >> 4) + 1; ++cx) {
             for (int cz = (baseZ >> 4) - 1; cz <= ((baseZ + size) >> 4) + 1; ++cz) {
                 world.getChunkProvider().provideChunk(cx, cz);
@@ -191,9 +223,14 @@ public final class TpsTest {
             final long cpuAfter = this.cpuBefore >= 0 ? LightProbe.pulsarWorkerCpuNanos() : -1;
 
             if (this.tickIndex < this.tickNanos.length) {
-                say(this.sender, String.format(Locale.ROOT,
-                        "tps %d edits/tick: wall-capped after %d ticks (engine too slow for the full %d)",
-                        this.editsPerTick, this.tickIndex, this.tickNanos.length));
+                say(
+                        this.sender,
+                        String.format(
+                                Locale.ROOT,
+                                "tps %d edits/tick: wall-capped after %d ticks (engine too slow for the full %d)",
+                                this.editsPerTick,
+                                this.tickIndex,
+                                this.tickNanos.length));
             }
             final long[] sorted = Arrays.copyOf(this.tickNanos, this.tickIndex);
             Arrays.sort(sorted);
@@ -204,25 +241,35 @@ public final class TpsTest {
                     ++over50;
                 }
             }
-            say(this.sender, String.format(Locale.ROOT,
-                    "tps %d edits/tick: mspt avg %.2f | p50 %.2f | p99 %.2f | max %.2f | ticks>50ms %d/%d",
-                    this.editsPerTick, avgMs,
-                    sorted[sorted.length / 2] * 1.0e-6,
-                    sorted[(int) Math.min(sorted.length - 1L, (long) Math.ceil(sorted.length * 0.99))] * 1.0e-6,
-                    sorted[sorted.length - 1] * 1.0e-6,
-                    over50, sorted.length));
-            final StringBuilder extra = new StringBuilder(String.format(Locale.ROOT,
+            say(
+                    this.sender,
+                    String.format(
+                            Locale.ROOT,
+                            "tps %d edits/tick: mspt avg %.2f | p50 %.2f | p99 %.2f | max %.2f | ticks>50ms %d/%d",
+                            this.editsPerTick,
+                            avgMs,
+                            sorted[sorted.length / 2] * 1.0e-6,
+                            sorted[(int) Math.min(sorted.length - 1L, (long) Math.ceil(sorted.length * 0.99))] * 1.0e-6,
+                            sorted[sorted.length - 1] * 1.0e-6,
+                            over50,
+                            sorted.length));
+            final StringBuilder extra = new StringBuilder(String.format(
+                    Locale.ROOT,
                     "tps %d edits/tick: ops %d | post-run light backlog drain %.2fs",
-                    this.editsPerTick, this.opsDone, drain * 1.0e-9));
+                    this.editsPerTick,
+                    this.opsDone,
+                    drain * 1.0e-9));
             if (cpuAfter >= 0) {
-                extra.append(String.format(Locale.ROOT, " | pulsar worker cpu %.2fs",
-                        (cpuAfter - this.cpuBefore) * 1.0e-9));
+                extra.append(
+                        String.format(Locale.ROOT, " | pulsar worker cpu %.2fs", (cpuAfter - this.cpuBefore) * 1.0e-9));
             }
             say(this.sender, extra.toString());
 
             if (avgMs > LADDER_ABORT_AVG_MSPT && !queue.isEmpty()) {
                 queue.clear();
-                say(this.sender, "tps sweep: saturated (avg mspt > " + LADDER_ABORT_AVG_MSPT + "), remaining steps skipped");
+                say(
+                        this.sender,
+                        "tps sweep: saturated (avg mspt > " + LADDER_ABORT_AVG_MSPT + "), remaining steps skipped");
                 return;
             }
             // light already settled by the drain above; chain the next ladder step

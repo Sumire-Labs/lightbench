@@ -1,11 +1,10 @@
 package com.sumirelabs.lightbench;
 
-import net.minecraft.world.World;
-
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Method;
+import net.minecraft.world.World;
 
 /**
  * Engine detection + the minimal per-engine adapters, all via reflection so
@@ -20,13 +19,17 @@ public final class LightProbe {
     }
 
     private final Engine engine;
-    private final Object pulsarManager;      // com.sumirelabs.pulsar.light.WorldLightManager
+    private final Object pulsarManager; // com.sumirelabs.pulsar.light.WorldLightManager
     private final Method pulsarHasUpdates;
-    private final Object alfheimEngine;      // dev.redstudio.alfheim.lighting.LightingEngine
+    private final Object alfheimEngine; // dev.redstudio.alfheim.lighting.LightingEngine
     private final Method alfheimProcess;
 
-    private LightProbe(final Engine engine, final Object pulsarManager, final Method pulsarHasUpdates,
-                       final Object alfheimEngine, final Method alfheimProcess) {
+    private LightProbe(
+            final Engine engine,
+            final Object pulsarManager,
+            final Method pulsarHasUpdates,
+            final Object alfheimEngine,
+            final Method alfheimProcess) {
         this.engine = engine;
         this.pulsarManager = pulsarManager;
         this.pulsarHasUpdates = pulsarHasUpdates;
@@ -38,7 +41,8 @@ public final class LightProbe {
         try {
             final Class<?> pulsarWorld = Class.forName("com.sumirelabs.pulsar.world.PulsarWorld");
             if (pulsarWorld.isInstance(world)) {
-                final Object manager = pulsarWorld.getMethod("pulsar$getLightManager").invoke(world);
+                final Object manager =
+                        pulsarWorld.getMethod("pulsar$getLightManager").invoke(world);
                 if (manager != null) {
                     final Method hasUpdates = manager.getClass().getMethod("hasUpdates");
                     return new LightProbe(Engine.PULSAR, manager, hasUpdates, null, null);
@@ -49,7 +53,8 @@ public final class LightProbe {
         try {
             final Class<?> provider = Class.forName("dev.redstudio.alfheim.api.ILightingEngineProvider");
             if (provider.isInstance(world)) {
-                final Object engine = provider.getMethod("getAlfheim$lightingEngine").invoke(world);
+                final Object engine =
+                        provider.getMethod("getAlfheim$lightingEngine").invoke(world);
                 if (engine != null) {
                     final Method process = engine.getClass().getMethod("processLightUpdates");
                     return new LightProbe(Engine.ALFHEIM, null, null, engine, process);

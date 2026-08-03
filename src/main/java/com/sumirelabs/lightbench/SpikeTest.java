@@ -1,17 +1,16 @@
 package com.sumirelabs.lightbench;
 
+import java.io.File;
+import java.io.PrintWriter;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Random;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.command.ICommandSender;
 import net.minecraft.init.Blocks;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraft.world.World;
-
-import java.io.File;
-import java.io.PrintWriter;
-import java.util.Arrays;
-import java.util.Locale;
-import java.util.Random;
 
 /**
  * Lag-spike benchmark ("spikes mode").
@@ -63,8 +62,15 @@ public final class SpikeTest {
     // cap or 3x the requested seconds of wall time.
     private long wallDeadline;
 
-    private SpikeTest(final ICommandSender sender, final World world, final LightProbe probe,
-                      final int editsPerSec, final int seconds, final int baseX, final int baseZ, final int size) {
+    private SpikeTest(
+            final ICommandSender sender,
+            final World world,
+            final LightProbe probe,
+            final int editsPerSec,
+            final int seconds,
+            final int baseX,
+            final int baseZ,
+            final int size) {
         this.sender = sender;
         this.world = world;
         this.probe = probe;
@@ -81,13 +87,26 @@ public final class SpikeTest {
     }
 
     /** Queue a single run. Platform prep happens synchronously here (untimed). */
-    public static void start(final ICommandSender sender, final World world,
-                             final int editsPerSec, final int seconds,
-                             final int baseX, final int baseZ, final int size) throws Exception {
+    public static void start(
+            final ICommandSender sender,
+            final World world,
+            final int editsPerSec,
+            final int seconds,
+            final int baseX,
+            final int baseZ,
+            final int size)
+            throws Exception {
         final LightProbe probe = LightProbe.create(world);
-        say(sender, String.format(Locale.ROOT,
-                "engine: %s | spike test: %d edits/s for %ds (platform %dx%d at y=254, every tick recorded)",
-                probe.engine().name().toLowerCase(Locale.ROOT), editsPerSec, seconds, size, size));
+        say(
+                sender,
+                String.format(
+                        Locale.ROOT,
+                        "engine: %s | spike test: %d edits/s for %ds (platform %dx%d at y=254, every tick recorded)",
+                        probe.engine().name().toLowerCase(Locale.ROOT),
+                        editsPerSec,
+                        seconds,
+                        size,
+                        size));
         TpsTest.prepPlatform(world, probe, baseX, baseZ, size);
         active = new SpikeTest(sender, world, probe, editsPerSec, seconds, baseX, baseZ, size);
     }
@@ -138,14 +157,24 @@ public final class SpikeTest {
             final String engine = this.probe.engine().name().toLowerCase(Locale.ROOT);
 
             if (this.tickIndex < this.tickNanos.length) {
-                say(this.sender, String.format(Locale.ROOT,
-                        "spikes: wall-capped after %d ticks (engine too slow for the full %d)",
-                        this.tickIndex, this.tickNanos.length));
+                say(
+                        this.sender,
+                        String.format(
+                                Locale.ROOT,
+                                "spikes: wall-capped after %d ticks (engine too slow for the full %d)",
+                                this.tickIndex,
+                                this.tickNanos.length));
             }
 
             // Per-tick CSV for timeline charts.
-            final File csv = new File(".", String.format(Locale.ROOT,
-                    "lightbench-spikes-%s-%deps-%d.csv", engine, this.editsPerSec, System.currentTimeMillis()));
+            final File csv = new File(
+                    ".",
+                    String.format(
+                            Locale.ROOT,
+                            "lightbench-spikes-%s-%deps-%d.csv",
+                            engine,
+                            this.editsPerSec,
+                            System.currentTimeMillis()));
             try (final PrintWriter out = new PrintWriter(csv, "UTF-8")) {
                 out.println("tick,ms");
                 for (int i = 0; i < this.tickIndex; ++i) {
@@ -163,22 +192,33 @@ public final class SpikeTest {
                 if (t > 100_000_000L) ++over100;
                 if (t > 250_000_000L) ++over250;
             }
-            say(this.sender, String.format(Locale.ROOT,
-                    "spikes %d edits/s: mspt avg %.2f | p50 %.2f | p99 %.2f | max %.2f (%d ticks, %d edits)",
-                    this.editsPerSec, avgMs,
-                    sorted[sorted.length / 2] * 1.0e-6,
-                    sorted[(int) Math.min(sorted.length - 1L, (long) Math.ceil(sorted.length * 0.99))] * 1.0e-6,
-                    sorted[sorted.length - 1] * 1.0e-6,
-                    this.tickIndex, this.opsDone));
-            say(this.sender, String.format(Locale.ROOT,
-                    "spikes: ticks >25ms %d | >50ms %d | >100ms %d | >250ms %d",
-                    over25, over50, over100, over250));
+            say(
+                    this.sender,
+                    String.format(
+                            Locale.ROOT,
+                            "spikes %d edits/s: mspt avg %.2f | p50 %.2f | p99 %.2f | max %.2f (%d ticks, %d edits)",
+                            this.editsPerSec,
+                            avgMs,
+                            sorted[sorted.length / 2] * 1.0e-6,
+                            sorted[(int) Math.min(sorted.length - 1L, (long) Math.ceil(sorted.length * 0.99))] * 1.0e-6,
+                            sorted[sorted.length - 1] * 1.0e-6,
+                            this.tickIndex,
+                            this.opsDone));
+            say(
+                    this.sender,
+                    String.format(
+                            Locale.ROOT,
+                            "spikes: ticks >25ms %d | >50ms %d | >100ms %d | >250ms %d",
+                            over25,
+                            over50,
+                            over100,
+                            over250));
             say(this.sender, "spikes: worst ticks — " + worstTicks(5));
-            final StringBuilder extra = new StringBuilder(String.format(Locale.ROOT,
-                    "spikes: post-run light backlog drain %.2fs", drain * 1.0e-9));
+            final StringBuilder extra = new StringBuilder(
+                    String.format(Locale.ROOT, "spikes: post-run light backlog drain %.2fs", drain * 1.0e-9));
             if (cpuAfter >= 0) {
-                extra.append(String.format(Locale.ROOT, " | pulsar worker cpu %.2fs",
-                        (cpuAfter - this.cpuBefore) * 1.0e-9));
+                extra.append(
+                        String.format(Locale.ROOT, " | pulsar worker cpu %.2fs", (cpuAfter - this.cpuBefore) * 1.0e-9));
             }
             say(this.sender, extra.toString());
             say(this.sender, "spikes: per-tick csv -> " + csv.getAbsolutePath());
@@ -201,8 +241,8 @@ public final class SpikeTest {
                 sb.append(", ");
             }
             final int idx = order[i];
-            sb.append(String.format(Locale.ROOT, "#%d %.0fms (t=%.1fs)",
-                    idx, this.tickNanos[idx] * 1.0e-6, idx / 20.0));
+            sb.append(
+                    String.format(Locale.ROOT, "#%d %.0fms (t=%.1fs)", idx, this.tickNanos[idx] * 1.0e-6, idx / 20.0));
         }
         return sb.toString();
     }
