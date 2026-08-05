@@ -110,6 +110,13 @@ public final class LightProbe {
         if (!bean.isThreadCpuTimeSupported()) {
             return -1;
         }
+        if (!bean.isThreadCpuTimeEnabled()) {
+            try {
+                bean.setThreadCpuTimeEnabled(true);
+            } catch (final SecurityException | UnsupportedOperationException ignored) {
+                return -1;
+            }
+        }
         long total = 0;
         for (final long id : bean.getAllThreadIds()) {
             final ThreadInfo info = bean.getThreadInfo(id);

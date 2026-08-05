@@ -1,29 +1,48 @@
 package com.sumirelabs.lightbench;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.CommandException;
 import net.minecraft.command.ICommandSender;
+import net.minecraft.command.WrongUsageException;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.text.TextComponentString;
 import net.minecraft.world.World;
+import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.IChunkProvider;
 import net.minecraft.world.gen.ChunkProviderServer;
 
 /**
- * {@code /lightbench [radius] [warmupRadius]} — deterministic generation
- * benchmark (defaults 50 → 101×101 = 10201 chunks, warmup 10 → 441).
+ * Deterministic generation and lighting benchmarks.
  *
- * <p>Warmup region is centred on chunk (-625, -625), the measured region on
- * chunk (625, 625) — the same ±10000-block offsets the original lightbench
- * uses, far away from spawn so every chunk is freshly generated.
+ * <p>{@code /lightbench gen} follows the original lightbench shape: it warms
+ * up on a 101x101 region, then measures 36 separate 17x17 regions. Work is
+ * submitted five chunks at a time and every batch waits until lighting has
+ * fully converged. Coordinates are chunk coordinates, so +/-10000 means
+ * roughly +/-160000 blocks from spawn.
+ *
+ * <p>{@code /lightbench bulk} retains this port's previous contiguous-square
+ * throughput test. It generates the whole square before performing one final
+ * light barrier, so its result answers a different question from {@code gen}.
  */
 public class CommandLightbench extends CommandBase {
 
-    private static final int WARMUP_CENTER = -625;
-    private static final int TEST_CENTER = 625;
+    private static final int GEN_WARMUP_CENTER = -10000;
+    private static final int GEN_TEST_CENTER = 10000;
+    private static final int GEN_WARMUP_RADIUS = 50;
+    private static final int GEN_REGION_RADIUS = 8;
+    private static final int GEN_BATCH_SIZE = 5;
+    private static final int GEN_REGION_COUNT = 36;
+    private static final int GEN_REGION_STRIDE = 40;
+
+    private static final int BULK_WARMUP_CENTER = -625;
+    private static final int BULK_TEST_CENTER = 625;
     private static final int EDITS_CENTER_X = 20000;
     private static final int EDITS_CENTER_Z = 20000;
 
@@ -34,7 +53,8 @@ public class CommandLightbench extends CommandBase {
 
     @Override
     public String getUsage(final ICommandSender sender) {
-        return "/lightbench [radius] [warmupRadius] | /lightbench edits [size] [reps]"
+        return "/lightbench gen | /lightbench bulk [radius] [warmupRadius]"
+                + " | /lightbench edits [size] [reps]"
                 + " | /lightbench tps <editsPerTick> [seconds] | /lightbench tps sweep [seconds]"
                 + " | /lightbench spikes [editsPerSec] [seconds]";
     }
@@ -101,21 +121,221 @@ public class CommandLightbench extends CommandBase {
                 return;
             }
 
-            final int radius = args.length > 0 ? parseInt(args[0], 1, 200) : 50;
-            final int warmupRadius = args.length > 1 ? parseInt(args[1], 0, 200) : 10;
-            say(
-                    sender,
-                    "engine: " + probe.engine().name().toLowerCase(Locale.ROOT)
-                            + " | seed: " + world.getSeed()
-                            + " | radius " + radius + " (warmup " + warmupRadius + ")");
-            if (warmupRadius > 0) {
-                runPhase(sender, world, probe, "warmup", WARMUP_CENTER, WARMUP_CENTER, warmupRadius);
+            if (args.length == 0 || "gen".equalsIgnoreCase(args[0])) {
+                if (args.length > 1) {
+                    throw new WrongUsageException(getUsage(sender));
+                }
+                runGenerationBenchmark(sender, world, probe);
+                return;
             }
-            runPhase(sender, world, probe, "test", TEST_CENTER, TEST_CENTER, radius);
+
+            if ("bulk".equalsIgnoreCase(args[0])) {
+                final int radius = args.length > 1 ? parseInt(args[1], 1, 200) : 50;
+                final int warmupRadius = args.length > 2 ? parseInt(args[2], 0, 200) : 10;
+                if (args.length > 3) {
+                    throw new WrongUsageException(getUsage(sender));
+                }
+                runBulkBenchmark(sender, world, probe, radius, warmupRadius);
+                return;
+            }
+
+            // Keep the old numeric form usable for existing scripts, while
+            // making the distinct benchmark mode explicit in new output.
+            if (isUnsignedInteger(args[0])) {
+                final int radius = parseInt(args[0], 1, 200);
+                final int warmupRadius = args.length > 1 ? parseInt(args[1], 0, 200) : 10;
+                if (args.length > 2) {
+                    throw new WrongUsageException(getUsage(sender));
+                }
+                say(
+                        sender,
+                        "numeric syntax is the legacy bulk mode; prefer /lightbench bulk " + radius + " "
+                                + warmupRadius);
+                runBulkBenchmark(sender, world, probe, radius, warmupRadius);
+                return;
+            }
+
+            throw new WrongUsageException(getUsage(sender));
+        } catch (final CommandException e) {
+            throw e;
         } catch (final Exception e) {
             Lightbench.LOGGER.error("lightbench failed", e);
             throw new CommandException("lightbench failed: " + e);
         }
+    }
+
+    private void runGenerationBenchmark(final ICommandSender sender, final World world, final LightProbe probe)
+            throws Exception {
+        final IChunkProvider provider = world.getChunkProvider();
+        final int warmupChunks = squareChunkCount(GEN_WARMUP_RADIUS);
+        final int chunksPerRegion = squareChunkCount(GEN_REGION_RADIUS);
+        final int measuredChunks = chunksPerRegion * GEN_REGION_COUNT;
+
+        say(
+                sender,
+                "engine: " + probe.engine().name().toLowerCase(Locale.ROOT)
+                        + " | seed: " + world.getSeed()
+                        + " | mode: gen (batch " + GEN_BATCH_SIZE + ", wait after every batch)");
+        say(
+                sender,
+                "gen plan: warmup " + warmupChunks + " chunks at -10000; test " + GEN_REGION_COUNT + " x "
+                        + chunksPerRegion + " = " + measuredChunks + " chunks from +10000");
+
+        final List<List<ChunkPos>> warmupRegions =
+                Collections.singletonList(createSquareRegion(GEN_WARMUP_CENTER, GEN_WARMUP_CENTER, GEN_WARMUP_RADIUS));
+        runBatchedRegions(sender, world, probe, "gen warmup", warmupRegions, GEN_BATCH_SIZE);
+        queueUnloadRegions(provider, warmupRegions);
+
+        final List<List<ChunkPos>> measuredRegions = createGenerationTestRegions();
+        runBatchedRegions(sender, world, probe, "gen test", measuredRegions, GEN_BATCH_SIZE);
+        queueUnloadRegions(provider, measuredRegions);
+    }
+
+    private void runBulkBenchmark(
+            final ICommandSender sender,
+            final World world,
+            final LightProbe probe,
+            final int radius,
+            final int warmupRadius)
+            throws Exception {
+        say(
+                sender,
+                "engine: " + probe.engine().name().toLowerCase(Locale.ROOT)
+                        + " | seed: " + world.getSeed()
+                        + " | mode: bulk | radius " + radius + " (warmup " + warmupRadius + ")");
+        say(
+                sender,
+                "bulk submits the complete square before one final light barrier; do not compare it as gen latency");
+        if (warmupRadius > 0) {
+            runBulkPhase(sender, world, probe, "bulk warmup", BULK_WARMUP_CENTER, BULK_WARMUP_CENTER, warmupRadius);
+        }
+        runBulkPhase(sender, world, probe, "bulk test", BULK_TEST_CENTER, BULK_TEST_CENTER, radius);
+    }
+
+    private void runBatchedRegions(
+            final ICommandSender sender,
+            final World world,
+            final LightProbe probe,
+            final String label,
+            final List<List<ChunkPos>> regions,
+            final int batchSize)
+            throws Exception {
+        final IChunkProvider provider = world.getChunkProvider();
+        int chunkCount = 0;
+        int batchCount = 0;
+        for (final List<ChunkPos> region : regions) {
+            chunkCount += region.size();
+            batchCount += (region.size() + batchSize - 1) / batchSize;
+        }
+
+        final long[] batchTimes = new long[batchCount];
+        final long[] regionTimes = new long[regions.size()];
+        final long cpuBefore = probe.engine() == LightProbe.Engine.PULSAR ? LightProbe.pulsarWorkerCpuNanos() : -1;
+        final long wallStart = System.nanoTime();
+        long provideNanos = 0;
+        long barrierNanos = 0;
+        int batchIndex = 0;
+
+        for (int regionIndex = 0; regionIndex < regions.size(); ++regionIndex) {
+            final List<ChunkPos> region = regions.get(regionIndex);
+            final long regionStart = System.nanoTime();
+            for (int first = 0; first < region.size(); first += batchSize) {
+                final int end = Math.min(first + batchSize, region.size());
+                final long batchStart = System.nanoTime();
+                for (int index = first; index < end; ++index) {
+                    final ChunkPos chunk = region.get(index);
+                    final long provideStart = System.nanoTime();
+                    provider.provideChunk(chunk.x, chunk.z);
+                    provideNanos += System.nanoTime() - provideStart;
+                }
+                final long barrier = probe.drainLight();
+                barrierNanos += barrier;
+                batchTimes[batchIndex++] = System.nanoTime() - batchStart;
+            }
+            regionTimes[regionIndex] = System.nanoTime() - regionStart;
+        }
+
+        final long total = System.nanoTime() - wallStart;
+        final long cpuAfter = probe.engine() == LightProbe.Engine.PULSAR ? LightProbe.pulsarWorkerCpuNanos() : -1;
+        say(
+                sender,
+                String.format(
+                        Locale.ROOT,
+                        "%s: %d chunks | %d batches | provide calls %.2fs | light barriers %.2fs"
+                                + " | total-until-lit %.2fs | %.1f chunks/s",
+                        label,
+                        chunkCount,
+                        batchCount,
+                        provideNanos * 1.0e-9,
+                        barrierNanos * 1.0e-9,
+                        total * 1.0e-9,
+                        chunkCount / (total * 1.0e-9)));
+        report(sender, label + " batch wall (up to " + batchSize + " chunks)", batchTimes);
+        if (regionTimes.length > 1) {
+            report(sender, label + " region wall (" + regions.get(0).size() + " chunks)", regionTimes);
+        }
+        if (cpuBefore >= 0 && cpuAfter >= 0) {
+            say(
+                    sender,
+                    String.format(Locale.ROOT, "%s pulsar worker cpu: %.2fs", label, (cpuAfter - cpuBefore) * 1.0e-9));
+        }
+    }
+
+    static List<List<ChunkPos>> createGenerationTestRegions() {
+        final List<List<ChunkPos>> regions = new ArrayList<>(GEN_REGION_COUNT);
+        for (int region = 0; region < GEN_REGION_COUNT; ++region) {
+            final int center = GEN_TEST_CENTER + region * GEN_REGION_STRIDE;
+            regions.add(createSpiralRegion(center, center, GEN_REGION_RADIUS));
+        }
+        return regions;
+    }
+
+    static List<ChunkPos> createSquareRegion(final int centerX, final int centerZ, final int radius) {
+        final List<ChunkPos> chunks = new ArrayList<>(squareChunkCount(radius));
+        for (int dx = -radius; dx <= radius; ++dx) {
+            for (int dz = -radius; dz <= radius; ++dz) {
+                chunks.add(new ChunkPos(centerX + dx, centerZ + dz));
+            }
+        }
+        return chunks;
+    }
+
+    /** Returns the original lightbench's insertion-ordered, centre-out square-ring traversal. */
+    static List<ChunkPos> createSpiralRegion(final int centerX, final int centerZ, final int radius) {
+        final List<ChunkPos> chunks = new ArrayList<>(squareChunkCount(radius));
+        chunks.add(new ChunkPos(centerX, centerZ));
+        for (int ring = 1; ring <= radius; ++ring) {
+            for (int x = -ring; x <= ring; ++x) {
+                chunks.add(new ChunkPos(centerX + x, centerZ + ring));
+            }
+            for (int z = ring - 1; z >= -ring; --z) {
+                chunks.add(new ChunkPos(centerX + ring, centerZ + z));
+            }
+            for (int x = ring - 1; x >= -ring; --x) {
+                chunks.add(new ChunkPos(centerX + x, centerZ - ring));
+            }
+            for (int z = ring - 1; z >= -ring + 1; --z) {
+                chunks.add(new ChunkPos(centerX - ring, centerZ + z));
+            }
+        }
+        return chunks;
+    }
+
+    static int squareChunkCount(final int radius) {
+        final int diameter = radius * 2 + 1;
+        return diameter * diameter;
+    }
+
+    private static boolean isUnsignedInteger(final String value) {
+        if (value.isEmpty()) {
+            return false;
+        }
+        for (int index = 0; index < value.length(); ++index) {
+            if (!Character.isDigit(value.charAt(index))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -146,7 +366,6 @@ public class CommandLightbench extends CommandBase {
         // Build the platform, then let the engine settle completely.
         final net.minecraft.block.state.IBlockState stone = net.minecraft.init.Blocks.STONE.getDefaultState();
         final long buildStart = System.nanoTime();
-        final BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
         for (int dx = 0; dx < size; ++dx) {
             for (int dz = 0; dz < size; ++dz) {
                 world.setBlockState(new BlockPos(baseX + dx, y, baseZ + dz), stone, 2);
@@ -196,12 +415,18 @@ public class CommandLightbench extends CommandBase {
                         "%s: avg %.3fms | p50 %.3fms | p99 %.3fms | max %.3fms",
                         label,
                         (sum / (double) sorted.length) * 1.0e-6,
-                        sorted[sorted.length / 2] * 1.0e-6,
-                        sorted[(int) Math.min(sorted.length - 1L, (long) Math.ceil(sorted.length * 0.99))] * 1.0e-6,
+                        percentile(sorted, 0.50) * 1.0e-6,
+                        percentile(sorted, 0.99) * 1.0e-6,
                         sorted[sorted.length - 1] * 1.0e-6));
     }
 
-    private void runPhase(
+    /** Nearest-rank percentile; {@code sorted} must be non-empty and ascending. */
+    static long percentile(final long[] sorted, final double quantile) {
+        final int index = Math.max(0, Math.min(sorted.length - 1, (int) Math.ceil(sorted.length * quantile) - 1));
+        return sorted[index];
+    }
+
+    private void runBulkPhase(
             final ICommandSender sender,
             final World world,
             final LightProbe probe,
@@ -212,17 +437,13 @@ public class CommandLightbench extends CommandBase {
             throws Exception {
         final IChunkProvider provider = world.getChunkProvider();
         final int count = (radius * 2 + 1) * (radius * 2 + 1);
-        final long[] perChunk = new long[count];
 
         final long cpuBefore = probe.engine() == LightProbe.Engine.PULSAR ? LightProbe.pulsarWorkerCpuNanos() : -1;
         final long wallStart = System.nanoTime();
 
-        int i = 0;
         for (int dx = -radius; dx <= radius; ++dx) {
             for (int dz = -radius; dz <= radius; ++dz) {
-                final long t0 = System.nanoTime();
                 provider.provideChunk(centerX + dx, centerZ + dz);
-                perChunk[i++] = System.nanoTime() - t0;
             }
         }
 
@@ -231,35 +452,44 @@ public class CommandLightbench extends CommandBase {
         final long total = System.nanoTime() - wallStart;
         final long cpuAfter = probe.engine() == LightProbe.Engine.PULSAR ? LightProbe.pulsarWorkerCpuNanos() : -1;
 
-        Arrays.sort(perChunk);
-        final long sum = Arrays.stream(perChunk).sum();
         final String line1 = String.format(
                 Locale.ROOT,
-                "%s: %d chunks | gen %.2fs | light drain %.2fs | total-until-lit %.2fs",
+                "%s: %d chunks | submit all %.2fs | final light barrier %.2fs"
+                        + " | total-until-lit %.2fs | %.1f chunks/s",
                 label,
                 count,
                 genWall * 1.0e-9,
                 drain * 1.0e-9,
-                total * 1.0e-9);
-        final String line2 = String.format(
-                Locale.ROOT,
-                "%s chunk times: avg %.2fms | p50 %.2fms | p99 %.2fms | max %.2fms",
-                label,
-                (sum / (double) count) * 1.0e-6,
-                perChunk[count / 2] * 1.0e-6,
-                perChunk[(int) Math.min(count - 1L, (long) Math.ceil(count * 0.99))] * 1.0e-6,
-                perChunk[count - 1] * 1.0e-6);
+                total * 1.0e-9,
+                count / (total * 1.0e-9));
         say(sender, line1);
-        say(sender, line2);
         if (cpuBefore >= 0 && cpuAfter >= 0) {
             say(
                     sender,
                     String.format(Locale.ROOT, "%s pulsar worker cpu: %.2fs", label, (cpuAfter - cpuBefore) * 1.0e-9));
         }
 
-        // Keep memory flat between phases; the measured work is already done.
-        if (provider instanceof ChunkProviderServer) {
-            ((ChunkProviderServer) provider).queueUnloadAll();
+        queueUnloadSquare(provider, centerX, centerZ, radius);
+    }
+
+    private static void queueUnloadSquare(
+            final IChunkProvider provider, final int centerX, final int centerZ, final int radius) {
+        queueUnloadRegions(provider, Collections.singletonList(createSquareRegion(centerX, centerZ, radius)));
+    }
+
+    /** Marks only benchmark chunks for normal server-tick unloading after this synchronous command returns. */
+    private static void queueUnloadRegions(final IChunkProvider provider, final List<List<ChunkPos>> regions) {
+        if (!(provider instanceof ChunkProviderServer)) {
+            return;
+        }
+        final ChunkProviderServer serverProvider = (ChunkProviderServer) provider;
+        for (final List<ChunkPos> region : regions) {
+            for (final ChunkPos position : region) {
+                final Chunk chunk = serverProvider.getLoadedChunk(position.x, position.z);
+                if (chunk != null) {
+                    serverProvider.queueUnload(chunk);
+                }
+            }
         }
     }
 

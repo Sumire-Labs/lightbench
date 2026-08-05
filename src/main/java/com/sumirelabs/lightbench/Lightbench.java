@@ -8,30 +8,32 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 /**
- * 1.12.2 port of the methodology of ca.spottedleaf/lightbench (LGPL-3.0):
- * generate a fixed, deterministic region of fresh chunks and measure how
- * long the installed light engine takes to fully light it.
+ * Minecraft 1.12.2 port of the methodology of ca.spottedleaf/lightbench
+ * (LGPL-3.0): generate deterministic fresh chunks and measure how long the
+ * installed light engine takes to finish them.
  *
- * <p>1.12.2 has no dedicated light thread and chunk generation is
- * synchronous, so instead of wrapping the light mailbox this port measures,
- * per engine and without any bytecode hooks:
+ * <p>The default {@code /lightbench gen} command warms up with a 101x101
+ * region, then measures 36 separate 17x17 regions. It requests at most five
+ * chunks per batch and waits for full light convergence after every batch.
+ * This produces comparable end-to-end wall times despite the engines using
+ * different execution models in 1.12.2:
  *
  * <ul>
- *   <li>wall time per generated chunk (avg / p50 / p99 / max — spike view)</li>
- *   <li>post-generation light drain: Pulsar works asynchronously, so the
- *       harness waits until its queues are empty; Alfheim defers into a
- *       queue flushed on read, so the harness times one full
- *       {@code processLightUpdates()}; vanilla lights inline (drain = 0)</li>
- *   <li>total wall time until the region is generated AND fully lit — the
- *       headline number that is fair across all three engines</li>
- *   <li>Pulsar only: CPU time of the {@code Pulsar-*} worker threads
- *       (ThreadMXBean), the async cost invisible to wall time</li>
+ *   <li>vanilla performs lighting inline while generating chunks;</li>
+ *   <li>Alfheim's deferred queue is explicitly flushed at each barrier;</li>
+ *   <li>Pulsar's asynchronous queues are polled until queued and in-flight
+ *       work has finished.</li>
  * </ul>
  *
- * <p>Protocol: create a FRESH world with a FIXED seed for every engine pass
- * (same seed → identical terrain → identical light work), then run
- * {@code /lightbench <radius> [warmupRadius]}. Re-running on a world that
- * already generated the bench region measures disk loads, not generation.
+ * <p>The headline metric is total wall time until every measured batch is
+ * generated and fully lit. Batch and region distributions expose variance;
+ * Pulsar worker CPU time is supplemental because parallel CPU seconds are not
+ * interchangeable with elapsed wall time. {@code /lightbench bulk} remains a
+ * separate whole-square throughput stress test.
+ *
+ * <p>Use a fresh world with the same fixed seed, JVM, configuration and mod
+ * list for every engine pass. Reusing a world measures chunk loading rather
+ * than generation.
  */
 @Mod(modid = Tags.ID, name = Tags.NAME, version = Tags.VERSION, acceptedMinecraftVersions = "[1.12.2]")
 public class Lightbench {
