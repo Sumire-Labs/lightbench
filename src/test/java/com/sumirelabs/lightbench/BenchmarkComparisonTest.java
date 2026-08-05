@@ -10,6 +10,7 @@ import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -167,6 +168,36 @@ class BenchmarkComparisonTest {
     }
 
     @Test
+    void onlyBuiltinRuntimeModsMayOmitPackagedSourceMetadata(@TempDir final Path temporary) throws Exception {
+        final JsonObject missingSource = result("vanilla", 1_000_000_000L, "123", SHA_A);
+        final JsonObject lightbench =
+                missingSource.getAsJsonArray("mods").get(0).getAsJsonObject();
+        lightbench.remove("source_name");
+        lightbench.remove("source_type");
+        lightbench.remove("source_size_bytes");
+        lightbench.remove("source_sha256");
+        final Path missingSourceFile = write(temporary.resolve("missing-source.json"), missingSource);
+        final Path valid = write(temporary.resolve("valid.json"), result("pulsar", 500_000_000L, "123", SHA_A));
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(Arrays.asList(missingSourceFile, valid), Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("packaged mod source metadata is required"));
+
+        final JsonObject firstResult = result("vanilla", 1_000_000_000L, "123", SHA_A);
+        final JsonObject secondResult = result("pulsar", 500_000_000L, "123", SHA_A);
+        firstResult.getAsJsonArray("mods").add(runtimeMod("minecraft", "1.12.2"));
+        secondResult.getAsJsonArray("mods").add(runtimeMod("minecraft", "1.12.2"));
+        final Path first = write(temporary.resolve("builtin-first.json"), firstResult);
+        final Path second = write(temporary.resolve("builtin-second.json"), secondResult);
+
+        assertEquals(
+                2,
+                BenchmarkComparison.compare(Arrays.asList(first, second), Collections.emptySet())
+                        .runCount());
+    }
+
+    @Test
     void commandDiscoversDirectoriesAndWritesAUniqueReportPair(@TempDir final Path temporary) throws Exception {
         final Path nested = temporary.resolve("results").resolve("worlds");
         Files.createDirectories(nested);
@@ -187,6 +218,25 @@ class BenchmarkComparisonTest {
             assertTrue(Files.isRegularFile(directory.resolve("comparison.csv")));
         }
         assertTrue(messages.toString(StandardCharsets.UTF_8.name()).contains("Compatibility checks passed for 2 runs"));
+    }
+
+    @Test
+    void commandAcceptsPlatformSeparatedAbsoluteResultPaths(@TempDir final Path temporary) throws Exception {
+        final Path first = write(temporary.resolve("vanilla.json"), result("vanilla", 1_000_000_000L, "123", SHA_A));
+        final Path second = write(temporary.resolve("pulsar.json"), result("pulsar", 500_000_000L, "123", SHA_A));
+        final Path outputRoot = temporary.resolve("reports");
+
+        final int exitCode = BenchmarkCompare.run(
+                new String[] {
+                    "--results",
+                    first.toAbsolutePath() + File.pathSeparator + second.toAbsolutePath(),
+                    "--output",
+                    outputRoot.toString()
+                },
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8.name()),
+                new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8.name()));
+
+        assertEquals(0, exitCode);
     }
 
     private static JsonObject result(
@@ -331,6 +381,14 @@ class BenchmarkComparisonTest {
         mod.addProperty("source_type", "file");
         mod.addProperty("source_size_bytes", 100);
         mod.addProperty("source_sha256", SHA_A);
+        return mod;
+    }
+
+    private static JsonObject runtimeMod(final String id, final String version) {
+        final JsonObject mod = new JsonObject();
+        mod.addProperty("id", id);
+        mod.addProperty("name", id);
+        mod.addProperty("version", version);
         return mod;
     }
 

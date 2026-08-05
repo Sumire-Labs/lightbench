@@ -2,6 +2,7 @@ package com.sumirelabs.lightbench;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -11,6 +12,10 @@ import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Map;
+import java.util.jar.JarEntry;
+import java.util.jar.JarOutputStream;
+import net.minecraftforge.common.ForgeVersion;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -105,6 +110,41 @@ class BenchmarkReportTest {
         assertArrayEquals(secondJson, Files.readAllBytes(second));
         try (java.util.stream.Stream<Path> files = Files.list(directory)) {
             assertEquals(2, files.count());
+        }
+    }
+
+    @Test
+    void packagedModSourcesAreResolvedFromForgeModDirectories(@TempDir final Path temporary) throws Exception {
+        final Path scalar = temporary.resolve("mods").resolve("Scalar Legacy.jar");
+        final Path relauncher =
+                temporary.resolve("mods").resolve(ForgeVersion.mcVersion).resolve("cleanroom-relauncher.jar");
+        writeModJar(scalar, "[{\"modid\":\"scalar\"}]");
+        writeModJar(relauncher, "{\"modList\":[{\"modid\":\"cleanroom-relauncher\"}]}");
+        writeModJar(temporary.resolve("mods").resolve("ignored.jar.disabled"), "[{\"modid\":\"ignored\"}]");
+        writeModJar(temporary.resolve("mods").resolve("memory_repo").resolve("nested.jar"), "[{\"modid\":\"nested\"}]");
+
+        final Map<String, Path> sources = BenchmarkReport.findPackagedModSources(temporary);
+
+        assertEquals(scalar.toAbsolutePath().normalize(), sources.get("scalar"));
+        assertEquals(relauncher.toAbsolutePath().normalize(), sources.get("cleanroom-relauncher"));
+        assertFalse(sources.containsKey("ignored"));
+        assertFalse(sources.containsKey("nested"));
+    }
+
+    @Test
+    void ambiguousPackagedModIdsAreNotGuessed(@TempDir final Path temporary) throws Exception {
+        writeModJar(temporary.resolve("mods").resolve("first.jar"), "[{\"modid\":\"duplicate\"}]");
+        writeModJar(temporary.resolve("mods").resolve("second.jar"), "[{\"modid\":\"duplicate\"}]");
+
+        assertFalse(BenchmarkReport.findPackagedModSources(temporary).containsKey("duplicate"));
+    }
+
+    private static void writeModJar(final Path target, final String metadata) throws Exception {
+        Files.createDirectories(target.getParent());
+        try (JarOutputStream output = new JarOutputStream(Files.newOutputStream(target))) {
+            output.putNextEntry(new JarEntry("mcmod.info"));
+            output.write(metadata.getBytes(StandardCharsets.UTF_8));
+            output.closeEntry();
         }
     }
 }

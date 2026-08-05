@@ -28,6 +28,10 @@ tasks.register('compareBenchmarks', JavaExec) {
     dependsOn benchmarkToolsClasses
     classpath = sourceSets.benchmarkTools.runtimeClasspath
     mainClass.set('com.sumirelabs.lightbench.BenchmarkCompare')
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion.set(JavaLanguageVersion.of(propertyString('java_version') as int))
+        vendor.set(JvmVendorSpec.AZUL)
+    })
 
     doFirst {
         if (!project.hasProperty('benchmarkResults')) {

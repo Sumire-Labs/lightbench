@@ -6,6 +6,7 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
@@ -118,9 +119,16 @@ public final class BenchmarkCompare {
     }
 
     private static List<Path> expandPathList(final String specification) {
-        final Path literal = Paths.get(specification);
-        if (Files.exists(literal) || specification.indexOf(File.pathSeparatorChar) < 0) {
-            return Collections.singletonList(literal);
+        if (specification.indexOf(File.pathSeparatorChar) < 0) {
+            return Collections.singletonList(Paths.get(specification));
+        }
+        try {
+            final Path literal = Paths.get(specification);
+            if (Files.exists(literal)) {
+                return Collections.singletonList(literal);
+            }
+        } catch (final InvalidPathException ignored) {
+            // Multiple absolute Windows paths contain another drive colon and are not one valid path.
         }
         final List<Path> paths = new ArrayList<>();
         for (final String component : specification.split(java.util.regex.Pattern.quote(File.pathSeparator))) {

@@ -3,11 +3,15 @@ package com.sumirelabs.lightbench;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
 import java.lang.management.GarbageCollectorMXBean;
 import java.lang.management.ManagementFactory;
@@ -25,8 +29,14 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.stream.Stream;
 import net.minecraft.world.World;
 import net.minecraftforge.common.ForgeVersion;
@@ -289,27 +299,131 @@ final class BenchmarkReport {
     private static JsonArray modsToJson() {
         final List<ModContainer> mods = new ArrayList<>(Loader.instance().getActiveModList());
         mods.sort(Comparator.comparing(ModContainer::getModId));
+        final Path gameDirectory = Loader.instance()
+                .getConfigDir()
+                .toPath()
+                .toAbsolutePath()
+                .normalize()
+                .getParent();
+        final Map<String, Path> packagedSources = new LinkedHashMap<>();
+        try {
+            packagedSources.putAll(findPackagedModSources(gameDirectory));
+        } catch (final IOException | SecurityException ignored) {
+            // Directory-backed entries remain explicit, so strict validation will reject unverifiable runs.
+        }
         final JsonArray result = new JsonArray();
         for (final ModContainer mod : mods) {
             final JsonObject item = new JsonObject();
             item.addProperty("id", mod.getModId());
             item.addProperty("name", mod.getName());
             item.addProperty("version", mod.getVersion());
-            if (mod.getSource() != null) {
+            final Path packagedSource = packagedSources.get(mod.getModId().toLowerCase(Locale.ROOT));
+            if (packagedSource != null) {
+                addFileSource(item, packagedSource);
+            } else if (mod.getSource() != null && mod.getSource().isFile()) {
+                addFileSource(item, mod.getSource().toPath());
+            } else if (mod.getSource() != null && !isBuiltinRuntimeMod(mod.getModId())) {
                 item.addProperty("source_name", mod.getSource().getName());
-                item.addProperty("source_type", mod.getSource().isFile() ? "file" : "directory");
-                if (mod.getSource().isFile()) {
-                    item.addProperty("source_size_bytes", mod.getSource().length());
-                    try {
-                        item.addProperty("source_sha256", sha256(mod.getSource().toPath()));
-                    } catch (final IOException | SecurityException e) {
-                        item.addProperty("source_sha256", "unavailable");
-                    }
-                }
+                item.addProperty("source_type", "directory");
             }
             result.add(item);
         }
         return result;
+    }
+
+    static Map<String, Path> findPackagedModSources(final Path gameDirectory) throws IOException {
+        final Path modsDirectory = gameDirectory.resolve("mods");
+        final List<Path> artifacts = new ArrayList<>();
+        collectPackagedMods(modsDirectory, artifacts);
+        collectPackagedMods(modsDirectory.resolve(ForgeVersion.mcVersion), artifacts);
+        artifacts.sort(Comparator.comparing(path -> normalizedRelativePath(gameDirectory, path)));
+
+        final Map<String, Path> result = new LinkedHashMap<>();
+        final Set<String> ambiguousIds = new LinkedHashSet<>();
+        for (final Path artifact : artifacts) {
+            for (final String id : readPackagedModIds(artifact)) {
+                if (ambiguousIds.contains(id)) {
+                    continue;
+                }
+                final Path previous = result.put(id, artifact);
+                if (previous != null && !previous.equals(artifact)) {
+                    result.remove(id);
+                    ambiguousIds.add(id);
+                }
+            }
+        }
+        return result;
+    }
+
+    private static void collectPackagedMods(final Path directory, final List<Path> result) throws IOException {
+        if (!Files.isDirectory(directory)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.list(directory)) {
+            paths.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
+                    .filter(BenchmarkReport::isPackagedMod)
+                    .map(path -> path.toAbsolutePath().normalize())
+                    .forEach(result::add);
+        }
+    }
+
+    private static boolean isPackagedMod(final Path path) {
+        final String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
+        return name.endsWith(".jar") || name.endsWith(".zip");
+    }
+
+    private static Set<String> readPackagedModIds(final Path artifact) {
+        final Set<String> result = new LinkedHashSet<>();
+        try (JarFile jar = new JarFile(artifact.toFile())) {
+            final JarEntry metadata = jar.getJarEntry("mcmod.info");
+            if (metadata == null) {
+                return result;
+            }
+            try (InputStreamReader reader =
+                    new InputStreamReader(jar.getInputStream(metadata), StandardCharsets.UTF_8)) {
+                final JsonElement parsed = new JsonParser().parse(reader);
+                final JsonArray entries;
+                if (parsed.isJsonArray()) {
+                    entries = parsed.getAsJsonArray();
+                } else if (parsed.isJsonObject()
+                        && parsed.getAsJsonObject().has("modList")
+                        && parsed.getAsJsonObject().get("modList").isJsonArray()) {
+                    entries = parsed.getAsJsonObject().getAsJsonArray("modList");
+                } else {
+                    return result;
+                }
+                for (final JsonElement entry : entries) {
+                    if (!entry.isJsonObject() || !entry.getAsJsonObject().has("modid")) {
+                        continue;
+                    }
+                    final String id =
+                            entry.getAsJsonObject().get("modid").getAsString().trim();
+                    if (!id.isEmpty()) {
+                        result.add(id.toLowerCase(Locale.ROOT));
+                    }
+                }
+            }
+        } catch (final IOException | JsonParseException | IllegalStateException | SecurityException ignored) {
+            // FML may accept artifacts without mcmod.info. Their ModContainer source remains the fallback.
+        }
+        return result;
+    }
+
+    private static void addFileSource(final JsonObject item, final Path source) {
+        final Path normalized = source.toAbsolutePath().normalize();
+        item.addProperty("source_name", normalized.getFileName().toString());
+        item.addProperty("source_type", "file");
+        try {
+            item.addProperty("source_size_bytes", Files.size(normalized));
+            item.addProperty("source_sha256", sha256(normalized));
+        } catch (final IOException | SecurityException e) {
+            item.addProperty("source_size_bytes", 0);
+            item.addProperty("source_sha256", "unavailable");
+        }
+    }
+
+    private static boolean isBuiltinRuntimeMod(final String id) {
+        return "minecraft".equalsIgnoreCase(id) || "mcp".equalsIgnoreCase(id);
     }
 
     private static JsonObject configFingerprint(final World world) {

@@ -45,6 +45,13 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
 
 - Preserve explicit JSON `null` values for unavailable worker CPU measurements and disabled bulk
   warmup instead of silently omitting those schema fields.
+- Run the offline comparison task with the configured Azul Java toolchain instead of inheriting the
+  Gradle daemon runtime.
+- Resolve packaged mod artifacts from Forge's top-level and version-specific `mods` directories so
+  coremods and Cleanroom-provided mods receive reproducible file hashes; strict comparison now rejects
+  missing artifact metadata for every non-platform mod.
+- Accept platform-separated lists of absolute benchmark-result paths on Windows without treating drive
+  letters as invalid separators.
 
 ## [0.1.0]
 

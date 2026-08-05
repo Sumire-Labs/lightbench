@@ -31,6 +31,8 @@ final class BenchmarkComparison {
     private static final int MAX_RENDERED_MISMATCH_VALUE = 240;
     private static final Set<String> KNOWN_ENGINE_MOD_IDS =
             Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("pulsar", "alfheim")));
+    private static final Set<String> BUILTIN_RUNTIME_MOD_IDS =
+            Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("minecraft", "mcp")));
     private static final List<String> STRICT_PATHS = Collections.unmodifiableList(Arrays.asList(
             "/schema_version",
             "/benchmark/mode",
@@ -601,6 +603,11 @@ final class BenchmarkComparison {
                 }
             } else if (mod.has("source_name") || mod.has("source_size_bytes") || mod.has("source_sha256")) {
                 throw invalid(source, path + "/source_type", "is required when source metadata is present");
+            } else if (!BUILTIN_RUNTIME_MOD_IDS.contains(id)) {
+                throw invalid(
+                        source,
+                        path + "/source_type",
+                        "packaged mod source metadata is required for content verification");
             }
             if (result.put(id, mod) != null) {
                 throw invalid(source, path + "/id", "duplicate mod id " + id);
