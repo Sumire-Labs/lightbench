@@ -34,7 +34,9 @@ final class UpdateBenchmark {
     static final int MEASURED_PAIRS = 200;
 
     private static final int MINIMUM_CLEAR_HEIGHT = 240;
-    private static final int WARMUP_OFFSET = -8;
+    // Keep the warmup and measured light-radius-14 footprints disjoint while
+    // retaining a 16-block opaque margin to every platform edge.
+    static final int WARMUP_OFFSET = -16;
 
     private UpdateBenchmark() {}
 
@@ -278,6 +280,15 @@ final class UpdateBenchmark {
 
         final BlockPos measured = new BlockPos(CENTER_X, PLATFORM_Y, CENTER_Z);
         final BlockPos warmup = new BlockPos(CENTER_X + WARMUP_OFFSET, PLATFORM_Y, CENTER_Z + WARMUP_OFFSET);
+        // Building the roof one column at a time can leave vanilla skylight in
+        // an order-dependent intermediate state. In particular, an early roof
+        // column may retain light that entered horizontally while neighbouring
+        // columns were still open. Re-run one complete open/close transition
+        // at each benchmark column after the final roof exists. This is outside
+        // every timed interval and gives all engines the same reachable,
+        // correctness-checked closed baseline.
+        normalizeSkyBaseline(world, probe, measured);
+        normalizeSkyBaseline(world, probe, warmup);
         verifySkyColumn(world, probe, measured, floorY, false);
         verifySkyColumn(world, probe, warmup, floorY, false);
 
@@ -295,6 +306,23 @@ final class UpdateBenchmark {
                 PLATFORM_SIZE * PLATFORM_SIZE,
                 checkedAirBlocks,
                 loadedChunks);
+    }
+
+    private static void normalizeSkyBaseline(final World world, final LightProbe probe, final BlockPos platformPosition)
+            throws Exception {
+        final IBlockState air = Blocks.AIR.getDefaultState();
+        final IBlockState stone = Blocks.STONE.getDefaultState();
+        requireState(world, platformPosition, stone, "sky normalization baseline");
+        if (!world.setBlockState(platformPosition, air, UPDATE_FLAGS)) {
+            throw new IllegalStateException(
+                    "could not open the sky normalization column at " + format(platformPosition));
+        }
+        probe.drainLight(platformPosition);
+        if (!world.setBlockState(platformPosition, stone, UPDATE_FLAGS)) {
+            throw new IllegalStateException(
+                    "could not close the sky normalization column at " + format(platformPosition));
+        }
+        probe.drainLight(platformPosition);
     }
 
     private static int findFloorY(final World world, final int x, final int z) {

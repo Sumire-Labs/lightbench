@@ -12,6 +12,7 @@ import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -20,6 +21,34 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class BenchmarkReportTest {
+
+    @Test
+    void configFingerprintIgnoresRuntimeTimingsAndCanonicalizesSplashComments(@TempDir final Path temporary)
+            throws Exception {
+        assertTrue(BenchmarkReport.isVolatileConfigArtifact("cleanroom_load_timings.dat"));
+        assertFalse(BenchmarkReport.isVolatileConfigArtifact("pulsar.cfg"));
+        assertTrue(BenchmarkReport.isCanonicalPropertiesFile("splash.properties"));
+
+        final Path first = temporary.resolve("first.properties");
+        final Path second = temporary.resolve("second.properties");
+        final Path changed = temporary.resolve("changed.properties");
+        Files.write(
+                first,
+                Arrays.asList("#Thu Aug 06 04:51:21 JST 2026", "enabled=true", "background=0xFFFFFF"),
+                StandardCharsets.ISO_8859_1);
+        Files.write(
+                second,
+                Arrays.asList("#Thu Aug 06 04:56:47 JST 2026", "background=0xFFFFFF", "enabled=true"),
+                StandardCharsets.ISO_8859_1);
+        Files.write(
+                changed,
+                Arrays.asList("#Thu Aug 06 04:56:47 JST 2026", "background=0xFFFFFF", "enabled=false"),
+                StandardCharsets.ISO_8859_1);
+
+        assertArrayEquals(BenchmarkReport.canonicalProperties(first), BenchmarkReport.canonicalProperties(second));
+        assertFalse(Arrays.equals(
+                BenchmarkReport.canonicalProperties(first), BenchmarkReport.canonicalProperties(changed)));
+    }
 
     @Test
     void serializerKeepsExplicitNullSchemaFields() {
@@ -142,7 +171,7 @@ class BenchmarkReportTest {
     }
 
     @Test
-    void fixedUpdateSamplesStayAtLeastTwentyFourBlocksFromPlatformEdges() {
+    void fixedUpdateSamplesHaveDisjointLightFootprintsAndStayInsidePlatform() {
         final int baseX = UpdateBenchmark.CENTER_X - UpdateBenchmark.PLATFORM_SIZE / 2;
         final int baseZ = UpdateBenchmark.CENTER_Z - UpdateBenchmark.PLATFORM_SIZE / 2;
 
@@ -155,13 +184,14 @@ class BenchmarkReportTest {
                         baseZ,
                         UpdateBenchmark.PLATFORM_SIZE));
         assertEquals(
-                24,
+                16,
                 UpdateBenchmark.minimumEdgeMargin(
-                        UpdateBenchmark.CENTER_X - 8,
-                        UpdateBenchmark.CENTER_Z - 8,
+                        UpdateBenchmark.CENTER_X + UpdateBenchmark.WARMUP_OFFSET,
+                        UpdateBenchmark.CENTER_Z + UpdateBenchmark.WARMUP_OFFSET,
                         baseX,
                         baseZ,
                         UpdateBenchmark.PLATFORM_SIZE));
+        assertTrue(Math.abs(UpdateBenchmark.WARMUP_OFFSET) * 2 > 28);
     }
 
     @Test

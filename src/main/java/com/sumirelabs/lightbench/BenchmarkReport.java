@@ -9,6 +9,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
 import com.google.gson.JsonParser;
 import com.google.gson.JsonPrimitive;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -34,7 +35,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.stream.Stream;
@@ -546,27 +549,78 @@ final class BenchmarkReport {
 
         try {
             final List<Path> files = new ArrayList<>();
+            final List<String> excludedFiles = new ArrayList<>();
             try (Stream<Path> stream = Files.walk(config)) {
                 stream.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
-                        .forEach(files::add);
+                        .forEach(path -> {
+                            final String relative = normalizedRelativePath(config, path);
+                            if (isVolatileConfigArtifact(relative)) {
+                                excludedFiles.add(relative);
+                            } else {
+                                files.add(path);
+                            }
+                        });
             }
             files.sort(Comparator.comparing(path -> normalizedRelativePath(config, path)));
+            excludedFiles.sort(String::compareTo);
 
             final MessageDigest digest = newDigest();
             final byte[] buffer = new byte[65536];
             for (final Path file : files) {
-                digest.update(normalizedRelativePath(config, file).getBytes(StandardCharsets.UTF_8));
+                final String relative = normalizedRelativePath(config, file);
+                digest.update(relative.getBytes(StandardCharsets.UTF_8));
                 digest.update((byte) 0);
-                updateDigest(digest, file, buffer);
+                if (isCanonicalPropertiesFile(relative)) {
+                    digest.update(canonicalProperties(file));
+                } else {
+                    updateDigest(digest, file, buffer);
+                }
                 digest.update((byte) 0);
             }
             result.addProperty("status", "ok");
             result.addProperty("file_count", files.size());
             result.addProperty("sha256", hex(digest.digest()));
+            final JsonArray excluded = new JsonArray();
+            for (final String relative : excludedFiles) {
+                excluded.add(new JsonPrimitive(relative));
+            }
+            result.add("excluded_volatile_files", excluded);
+            final JsonArray canonicalized = new JsonArray();
+            canonicalized.add(new JsonPrimitive("splash.properties"));
+            result.add("canonicalized_property_files", canonicalized);
         } catch (final IOException | UncheckedIOException | SecurityException e) {
             result.addProperty("status", "unavailable");
         }
         return result;
+    }
+
+    static boolean isVolatileConfigArtifact(final String relativePath) {
+        return "cleanroom_load_timings.dat".equalsIgnoreCase(relativePath);
+    }
+
+    static boolean isCanonicalPropertiesFile(final String relativePath) {
+        return "splash.properties".equalsIgnoreCase(relativePath);
+    }
+
+    static byte[] canonicalProperties(final Path file) throws IOException {
+        final Properties loaded = new Properties();
+        try (InputStream input = Files.newInputStream(file)) {
+            loaded.load(input);
+        }
+
+        final Map<String, String> sorted = new TreeMap<>();
+        for (final String name : loaded.stringPropertyNames()) {
+            sorted.put(name, loaded.getProperty(name));
+        }
+
+        final ByteArrayOutputStream output = new ByteArrayOutputStream();
+        for (final Map.Entry<String, String> entry : sorted.entrySet()) {
+            output.write(entry.getKey().getBytes(StandardCharsets.UTF_8));
+            output.write(0);
+            output.write(entry.getValue().getBytes(StandardCharsets.UTF_8));
+            output.write(0);
+        }
+        return output.toByteArray();
     }
 
     private static String sha256(final Path file) throws IOException {

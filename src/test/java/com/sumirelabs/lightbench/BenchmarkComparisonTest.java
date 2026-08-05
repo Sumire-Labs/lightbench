@@ -645,7 +645,7 @@ class BenchmarkComparisonTest {
         platform.addProperty("block", "minecraft:stone");
         platform.addProperty("loaded_chunk_halo", 1);
         platform.addProperty("minimum_clear_height", 240);
-        platform.addProperty("minimum_sample_edge_margin", 24);
+        platform.addProperty("minimum_sample_edge_margin", 16);
         plan.add("platform", platform);
 
         final JsonObject floor = new JsonObject();
@@ -661,7 +661,7 @@ class BenchmarkComparisonTest {
         sky.addProperty("baseline_block", "minecraft:stone");
         sky.addProperty("changed_block", "minecraft:air");
         sky.add("phase_order", stringArray("sky_remove", "sky_place"));
-        sky.add("warmup_position", coordinate(20000, 254, 20000));
+        sky.add("warmup_position", coordinate(19992, 254, 19992));
         sky.add("measured_position", coordinate(20008, 254, 20008));
         final JsonArray openExpected = new JsonArray();
         openExpected.add(expectation(20008, 253, 20008, 15));
@@ -684,7 +684,7 @@ class BenchmarkComparisonTest {
         block.addProperty("baseline_block", "minecraft:air");
         block.addProperty("changed_block", "minecraft:glowstone");
         block.add("phase_order", stringArray("block_place", "block_remove"));
-        block.add("warmup_position", coordinate(20000, 4, 20000));
+        block.add("warmup_position", coordinate(19992, 4, 19992));
         block.add("measured_position", coordinate(20008, 4, 20008));
         final JsonArray presentExpected = new JsonArray();
         presentExpected.add(expectation(20008, 4, 20008, 15));

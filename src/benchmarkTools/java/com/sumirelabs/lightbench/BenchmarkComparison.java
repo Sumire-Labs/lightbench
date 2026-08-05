@@ -493,11 +493,11 @@ final class BenchmarkComparison {
         }
         final int declaredEdgeMargin =
                 positiveInt(platform, "/benchmark/plan/platform/minimum_sample_edge_margin", source);
-        if (declaredEdgeMargin < 24) {
+        if (declaredEdgeMargin < 16) {
             throw invalid(
                     source,
                     "/benchmark/plan/platform/minimum_sample_edge_margin",
-                    "must leave at least 24 blocks around every sample center");
+                    "must leave at least 16 blocks around every sample center");
         }
 
         final JsonObject floor = requiredObject(plan, "/benchmark/plan/floor", source);
@@ -533,7 +533,7 @@ final class BenchmarkComparison {
                 sky, "/benchmark/plan/workloads/0/phase_order", new String[] {"sky_remove", "sky_place"}, source);
         final int[] skyWarmup = requiredBlockCoordinate(sky, "/benchmark/plan/workloads/0/warmup_position", source);
         final int[] skyMeasured = requiredBlockCoordinate(sky, "/benchmark/plan/workloads/0/measured_position", source);
-        if (skyWarmup[0] != 20000 || skyWarmup[2] != 20000 || skyMeasured[0] != 20008 || skyMeasured[2] != 20008) {
+        if (skyWarmup[0] != 19992 || skyWarmup[2] != 19992 || skyMeasured[0] != 20008 || skyMeasured[2] != 20008) {
             throw invalid(
                     source, "/benchmark/plan/workloads/0", "must use the fixed warmup and measured x/z positions");
         }
@@ -567,6 +567,14 @@ final class BenchmarkComparison {
         if (Arrays.equals(skyWarmup, skyMeasured)) {
             throw invalid(
                     source, "/benchmark/plan/workloads/0/warmup_position", "must differ from the measured position");
+        }
+        final long sampleSeparation =
+                Math.abs((long) skyWarmup[0] - skyMeasured[0]) + Math.abs((long) skyWarmup[2] - skyMeasured[2]);
+        if (sampleSeparation <= 28L) {
+            throw invalid(
+                    source,
+                    "/benchmark/plan/workloads/0/warmup_position",
+                    "must keep the warmup and measured light-radius-14 footprints disjoint");
         }
 
         final int actualEdgeMargin = Math.min(

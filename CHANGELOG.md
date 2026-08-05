@@ -24,6 +24,11 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
   zero when the supported counter started disabled.
 - Added dedicated/integrated server metadata to result files and documented generation as an
   end-to-end world-generation workload rather than a lighting-only microbenchmark.
+- Moved the update-benchmark warmup position so its light-radius-14 footprint is disjoint from the
+  measured position while both retain an opaque margin inside the controlled platform.
+- Excluded Cleanroom's per-launch timing cache from config fingerprints and canonicalized Forge's
+  timestamped `splash.properties` comments. Actual property values and all other config files remain
+  fingerprinted, and both normalization rules are recorded in every result.
 
 ### Added
 
@@ -51,6 +56,10 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
 
 ### Fixed
 
+- Normalized both skylight sample columns with an untimed open/close transition after the complete
+  roof is built, removing construction-order-dependent vanilla skylight from the benchmark baseline.
+- Corrected strict update-plan validation to require the actual 16-block minimum edge margin and to
+  reject overlapping warmup and measured light footprints.
 - Preserve explicit JSON `null` values for unavailable worker CPU measurements and disabled bulk
   warmup instead of silently omitting those schema fields.
 - Run the offline comparison task with the configured Azul Java toolchain instead of inheriting the

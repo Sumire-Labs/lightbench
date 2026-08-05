@@ -75,7 +75,7 @@ The JSON contains:
 - Integrated/dedicated server mode and server implementation class. Update results also record measurement-window GC deltas and Pulsar worker CPU time when available.
 - Terrain type, generator options, structures setting and difficulty.
 - The active mod list, versions, source filenames and SHA-256 hashes for file-backed mods.
-- A combined SHA-256 fingerprint of the instance's regular config files, without copying their contents into the report.
+- A combined SHA-256 fingerprint of the instance's benchmark-relevant config contents, without copying those values into the report.
 
 Raw observations are stored in preallocated primitive arrays while the benchmark is running. JSON construction, mod/config hashing, console summaries and disk writing begin only after all measured phases have finished, so result-file work is not included in `total-until-lit` or update completion samples.
 
@@ -108,7 +108,7 @@ The comparator also refuses a run if its config fingerprint was unavailable, a f
 
 Pulsar and Alfheim are treated as the engine choices, so their mod entries may differ between engine groups. Repeated runs of one engine must still use exactly the same version and JAR hash. Other known-safe differences can be excluded explicitly with `-PbenchmarkIgnoreMods=id1,id2`, but doing so weakens the comparability check and should be disclosed with published results.
 
-The config fingerprint covers the complete `config` directory. When switching engines in one instance, retain every engine's config file and keep the directory byte-for-byte identical for all runs; otherwise the comparator deliberately refuses the comparison.
+The config fingerprint covers the benchmark-relevant contents of the complete `config` directory. It excludes Cleanroom's `cleanroom_load_timings.dat`, which is a measured startup-time cache, and canonicalizes `splash.properties` so Forge's rewritten timestamp comment does not change the fingerprint; both rules are recorded in the result. All actual property values remain fingerprinted. When switching engines in one instance, retain every engine's config file and keep every other config file byte-for-byte identical for all runs; otherwise the comparator deliberately refuses the comparison.
 
 ## Fair-run checklist
 
