@@ -36,6 +36,11 @@ import org.apache.logging.log4j.Logger;
  * any target or one-chunk-border coordinate that the provider reports as
  * already generated, without loading it. Reusing generated coordinates would
  * measure chunk loading rather than generation.
+ *
+ * <p>Completed generation runs write a versioned JSON report to the world's
+ * {@code lightbench-results} directory. Raw batch data is recorded into
+ * preallocated primitive arrays; environment collection, hashing,
+ * serialization and file I/O happen only after measured phases finish.
  */
 @Mod(modid = Tags.ID, name = Tags.NAME, version = Tags.VERSION, acceptedMinecraftVersions = "[1.12.2]")
 public class Lightbench {

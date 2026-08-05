@@ -1,5 +1,6 @@
 package com.sumirelabs.lightbench;
 
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -189,15 +190,34 @@ public class CommandLightbench extends CommandBase {
                 sender,
                 "gen plan: warmup " + warmupChunks + " chunks at -10000; test " + GEN_REGION_COUNT + " x "
                         + chunksPerRegion + " = " + measuredChunks + " chunks from +10000");
-        if (!requireFreshFootprint(sender, provider, allRegions)) {
+        final PreflightResult preflight = requireFreshFootprint(sender, provider, allRegions);
+        if (!preflight.fresh) {
             return;
         }
 
-        runBatchedRegions(sender, world, probe, "gen warmup", warmupRegions, GEN_BATCH_SIZE);
+        final String startedAtUtc = BenchmarkReport.nowUtc();
+        final List<BenchmarkPhaseResult> phases = new ArrayList<>(2);
+        phases.add(runBatchedRegions(sender, world, probe, "gen warmup", warmupRegions, GEN_BATCH_SIZE));
         queueUnloadRegions(provider, warmupRegions);
 
-        runBatchedRegions(sender, world, probe, "gen test", measuredRegions, GEN_BATCH_SIZE);
+        phases.add(runBatchedRegions(sender, world, probe, "gen test", measuredRegions, GEN_BATCH_SIZE));
         queueUnloadRegions(provider, measuredRegions);
+        writeBenchmarkReport(
+                sender,
+                world,
+                probe,
+                "gen",
+                startedAtUtc,
+                preflight,
+                BenchmarkReport.generationPlan(
+                        GEN_WARMUP_CENTER,
+                        GEN_WARMUP_RADIUS,
+                        GEN_TEST_CENTER,
+                        GEN_REGION_RADIUS,
+                        GEN_REGION_COUNT,
+                        GEN_REGION_STRIDE,
+                        GEN_BATCH_SIZE),
+                phases);
     }
 
     private void runBulkBenchmark(
@@ -222,16 +242,29 @@ public class CommandLightbench extends CommandBase {
         say(
                 sender,
                 "bulk submits the complete square before one final light barrier; do not compare it as gen latency");
-        if (!requireFreshFootprint(sender, provider, regions)) {
+        final PreflightResult preflight = requireFreshFootprint(sender, provider, regions);
+        if (!preflight.fresh) {
             return;
         }
+        final String startedAtUtc = BenchmarkReport.nowUtc();
+        final List<BenchmarkPhaseResult> phases = new ArrayList<>(2);
         if (warmupRadius > 0) {
-            runBulkPhase(sender, world, probe, "bulk warmup", BULK_WARMUP_CENTER, BULK_WARMUP_CENTER, warmupRadius);
+            phases.add(runBulkPhase(
+                    sender, world, probe, "bulk warmup", BULK_WARMUP_CENTER, BULK_WARMUP_CENTER, warmupRadius));
         }
-        runBulkPhase(sender, world, probe, "bulk test", BULK_TEST_CENTER, BULK_TEST_CENTER, radius);
+        phases.add(runBulkPhase(sender, world, probe, "bulk test", BULK_TEST_CENTER, BULK_TEST_CENTER, radius));
+        writeBenchmarkReport(
+                sender,
+                world,
+                probe,
+                "bulk",
+                startedAtUtc,
+                preflight,
+                BenchmarkReport.bulkPlan(BULK_WARMUP_CENTER, warmupRadius, BULK_TEST_CENTER, radius),
+                phases);
     }
 
-    private boolean requireFreshFootprint(
+    private PreflightResult requireFreshFootprint(
             final ICommandSender sender, final IChunkProvider provider, final List<List<ChunkPos>> regions) {
         final List<ChunkPos> footprint = createFreshnessFootprint(regions, FRESHNESS_HALO);
         final long start = System.nanoTime();
@@ -243,7 +276,7 @@ public class CommandLightbench extends CommandBase {
                     "preflight failed: chunk " + existing
                             + " in the benchmark footprint already exists (the check includes a one-chunk border)");
             say(sender, "no benchmark chunks were requested; create a fresh world before measuring generation");
-            return false;
+            return new PreflightResult(false, footprint.size(), elapsed);
         }
         say(
                 sender,
@@ -252,10 +285,37 @@ public class CommandLightbench extends CommandBase {
                         "preflight: %d target-and-border chunks are ungenerated (%.3fs)",
                         footprint.size(),
                         elapsed * 1.0e-9));
-        return true;
+        return new PreflightResult(true, footprint.size(), elapsed);
     }
 
-    private void runBatchedRegions(
+    private void writeBenchmarkReport(
+            final ICommandSender sender,
+            final World world,
+            final LightProbe probe,
+            final String mode,
+            final String startedAtUtc,
+            final PreflightResult preflight,
+            final BenchmarkReport.Plan plan,
+            final List<BenchmarkPhaseResult> phases) {
+        try {
+            final Path output = BenchmarkReport.write(
+                    world,
+                    mode,
+                    probe.engine(),
+                    startedAtUtc,
+                    FRESHNESS_HALO,
+                    preflight.footprintChunks,
+                    preflight.elapsedNanos,
+                    plan,
+                    phases);
+            say(sender, "raw result saved: " + output.toAbsolutePath());
+        } catch (final Exception e) {
+            Lightbench.LOGGER.error("could not write Lightbench raw result", e);
+            say(sender, "raw result write failed; the completed console measurements remain available in the log");
+        }
+    }
+
+    private BenchmarkPhaseResult runBatchedRegions(
             final ICommandSender sender,
             final World world,
             final LightProbe probe,
@@ -273,6 +333,17 @@ public class CommandLightbench extends CommandBase {
 
         final long[] batchTimes = new long[batchCount];
         final long[] regionTimes = new long[regions.size()];
+        final int[] batchRegionIndices = new int[batchCount];
+        final int[] batchFirstIndices = new int[batchCount];
+        final int[] batchChunkCounts = new int[batchCount];
+        final int[] batchFirstChunkX = new int[batchCount];
+        final int[] batchFirstChunkZ = new int[batchCount];
+        final int[] batchLastChunkX = new int[batchCount];
+        final int[] batchLastChunkZ = new int[batchCount];
+        final long[] batchProvideTimes = new long[batchCount];
+        final long[] batchBarrierTimes = new long[batchCount];
+        final int[] regionChunkCounts = new int[regions.size()];
+        final int[] regionBatchCounts = new int[regions.size()];
         final long cpuBefore = probe.engine() == LightProbe.Engine.PULSAR ? LightProbe.pulsarWorkerCpuNanos() : -1;
         final long wallStart = System.nanoTime();
         long provideNanos = 0;
@@ -282,20 +353,39 @@ public class CommandLightbench extends CommandBase {
         for (int regionIndex = 0; regionIndex < regions.size(); ++regionIndex) {
             final List<ChunkPos> region = regions.get(regionIndex);
             final long regionStart = System.nanoTime();
+            final int firstBatchInRegion = batchIndex;
             for (int first = 0; first < region.size(); first += batchSize) {
                 final int end = Math.min(first + batchSize, region.size());
                 final long batchStart = System.nanoTime();
+                long batchProvideNanos = 0;
                 for (int index = first; index < end; ++index) {
                     final ChunkPos chunk = region.get(index);
                     final long provideStart = System.nanoTime();
                     provider.provideChunk(chunk.x, chunk.z);
-                    provideNanos += System.nanoTime() - provideStart;
+                    final long provide = System.nanoTime() - provideStart;
+                    provideNanos += provide;
+                    batchProvideNanos += provide;
                 }
                 final long barrier = probe.drainLight();
                 barrierNanos += barrier;
-                batchTimes[batchIndex++] = System.nanoTime() - batchStart;
+                final long batchWall = System.nanoTime() - batchStart;
+                batchTimes[batchIndex] = batchWall;
+                final ChunkPos firstChunk = region.get(first);
+                final ChunkPos lastChunk = region.get(end - 1);
+                batchRegionIndices[batchIndex] = regionIndex;
+                batchFirstIndices[batchIndex] = first;
+                batchChunkCounts[batchIndex] = end - first;
+                batchFirstChunkX[batchIndex] = firstChunk.x;
+                batchFirstChunkZ[batchIndex] = firstChunk.z;
+                batchLastChunkX[batchIndex] = lastChunk.x;
+                batchLastChunkZ[batchIndex] = lastChunk.z;
+                batchProvideTimes[batchIndex] = batchProvideNanos;
+                batchBarrierTimes[batchIndex] = barrier;
+                ++batchIndex;
             }
             regionTimes[regionIndex] = System.nanoTime() - regionStart;
+            regionChunkCounts[regionIndex] = region.size();
+            regionBatchCounts[regionIndex] = batchIndex - firstBatchInRegion;
         }
 
         final long total = System.nanoTime() - wallStart;
@@ -322,6 +412,27 @@ public class CommandLightbench extends CommandBase {
                     sender,
                     String.format(Locale.ROOT, "%s pulsar worker cpu: %.2fs", label, (cpuAfter - cpuBefore) * 1.0e-9));
         }
+        final long workerCpuNanos = cpuBefore >= 0 && cpuAfter >= 0 ? cpuAfter - cpuBefore : -1;
+        return new BenchmarkPhaseResult(
+                label,
+                chunkCount,
+                batchSize,
+                provideNanos,
+                barrierNanos,
+                total,
+                workerCpuNanos,
+                new BenchmarkPhaseResult.BatchSamples(
+                        batchRegionIndices,
+                        batchFirstIndices,
+                        batchChunkCounts,
+                        batchFirstChunkX,
+                        batchFirstChunkZ,
+                        batchLastChunkX,
+                        batchLastChunkZ,
+                        batchProvideTimes,
+                        batchBarrierTimes,
+                        batchTimes),
+                new BenchmarkPhaseResult.RegionSamples(regionChunkCounts, regionBatchCounts, regionTimes));
     }
 
     static List<List<ChunkPos>> createGenerationTestRegions() {
@@ -506,7 +617,7 @@ public class CommandLightbench extends CommandBase {
         return sorted[index];
     }
 
-    private void runBulkPhase(
+    private BenchmarkPhaseResult runBulkPhase(
             final ICommandSender sender,
             final World world,
             final LightProbe probe,
@@ -550,6 +661,27 @@ public class CommandLightbench extends CommandBase {
         }
 
         queueUnloadSquare(provider, centerX, centerZ, radius);
+        final long workerCpuNanos = cpuBefore >= 0 && cpuAfter >= 0 ? cpuAfter - cpuBefore : -1;
+        return new BenchmarkPhaseResult(
+                label,
+                count,
+                count,
+                genWall,
+                drain,
+                total,
+                workerCpuNanos,
+                new BenchmarkPhaseResult.BatchSamples(
+                        new int[] {0},
+                        new int[] {0},
+                        new int[] {count},
+                        new int[] {centerX - radius},
+                        new int[] {centerZ - radius},
+                        new int[] {centerX + radius},
+                        new int[] {centerZ + radius},
+                        new long[] {genWall},
+                        new long[] {drain},
+                        new long[] {total}),
+                new BenchmarkPhaseResult.RegionSamples(new int[] {count}, new int[] {1}, new long[] {total}));
     }
 
     private static void queueUnloadSquare(
@@ -570,6 +702,19 @@ public class CommandLightbench extends CommandBase {
                     serverProvider.queueUnload(chunk);
                 }
             }
+        }
+    }
+
+    private static final class PreflightResult {
+
+        private final boolean fresh;
+        private final int footprintChunks;
+        private final long elapsedNanos;
+
+        private PreflightResult(final boolean fresh, final int footprintChunks, final long elapsedNanos) {
+            this.fresh = fresh;
+            this.footprintChunks = footprintChunks;
+            this.elapsedNanos = elapsedNanos;
         }
     }
 

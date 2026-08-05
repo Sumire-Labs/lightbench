@@ -37,6 +37,22 @@ This is intentionally a very heavy synchronous run. The game can appear frozen w
 
 Other workloads are available through `/lightbench edits`, `/lightbench tps`, and `/lightbench spikes`.
 
+## Result files
+
+Every completed `gen` or `bulk` run writes a versioned JSON file under the tested world's `lightbench-results` directory. The filename includes the UTC completion time, mode, detected engine and dimension. Existing files are never overwritten.
+
+The JSON contains:
+
+- The exact seed as a lossless string, dimension ID and provider, Lightbench version and benchmark plan.
+- Integer-nanosecond totals and every raw batch sample, including its region, size, first and last chunk, `provideChunk` time, completion-barrier time and wall time.
+- Region samples and nearest-rank p50, p95 and p99 summaries.
+- Minecraft, Forge and MCP versions; Java VM, heap limit, GC and performance-related JVM arguments; OS, logical processor count and the platform-provided CPU identifier when available.
+- Terrain type, generator options, structures setting and difficulty.
+- The active mod list, versions, source filenames and SHA-256 hashes for file-backed mods.
+- A combined SHA-256 fingerprint of the instance's regular config files, without copying their contents into the report.
+
+Raw observations are stored in preallocated primitive arrays while the benchmark is running. JSON construction, mod/config hashing and disk writing begin only after all measured phases have finished, so result-file work is not included in `total-until-lit`.
+
 ## Fair-run checklist
 
 For each engine under comparison:
@@ -46,6 +62,8 @@ For each engine under comparison:
 3. Give every run the same JVM arguments and memory allocation, and avoid other heavy work on the machine.
 4. Let the built-in warmup finish. Compare the measured `gen test` result, not the warmup result.
 5. Save the complete log, including the detected engine, seed, plan and all result lines.
+
+Keep the generated JSON files as the authoritative raw results. A comparison script can reject runs whose schema, plan, seed, world settings, mod hashes or config fingerprint do not match before calculating tables or graphs.
 
 Pulsar runs require a build whose global pending-light status remains true for both queued and already-dequeued worker tasks. Otherwise a completion barrier can return early and produce an invalid low time.
 

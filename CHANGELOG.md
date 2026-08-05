@@ -30,6 +30,11 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
 - Added a non-generating fresh-world preflight for `gen` and `bulk`. The command now checks every
   target plus a one-chunk border and aborts before requesting chunks if any part of that footprint
   already exists.
+- Added versioned JSON result files for completed `gen` and `bulk` runs, including lossless run
+  metadata, every raw batch and region observation, environment details, mod JAR hashes and a combined
+  config-file fingerprint.
+- Raw observations are captured in preallocated primitive arrays, while JSON construction, hashing and
+  disk output happen after measured phases so reporting work does not inflate benchmark timings.
 
 ## [0.1.0]
 
