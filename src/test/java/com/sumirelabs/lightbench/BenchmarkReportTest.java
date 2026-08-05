@@ -3,8 +3,10 @@ package com.sumirelabs.lightbench;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,6 +15,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class BenchmarkReportTest {
+
+    @Test
+    void serializerKeepsExplicitNullSchemaFields() {
+        final JsonObject result = new JsonObject();
+        result.add("optional_measurement", JsonNull.INSTANCE);
+
+        final String json = new String(BenchmarkReport.serializeJson(result), StandardCharsets.UTF_8);
+        assertTrue(json.contains("\"optional_measurement\": null"));
+    }
 
     @Test
     void phaseJsonKeepsIntegerRawSamplesCoordinatesAndDistribution() {

@@ -35,6 +35,16 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
   config-file fingerprint.
 - Raw observations are captured in preallocated primitive arrays, while JSON construction, hashing and
   disk output happen after measured phases so reporting work does not inflate benchmark timings.
+- Added an offline comparison task that validates schema-1 files and their raw batch/region
+  consistency, rejects different benchmark conditions, and writes per-run CSV plus engine-grouped
+  Markdown summaries only for comparable results.
+- Added checks that repeated measurements use the same engine JAR and that raw chunk traversal is
+  identical across runs, while allowing the selected light-engine mod to differ between groups.
+
+### Fixed
+
+- Preserve explicit JSON `null` values for unavailable worker CPU measurements and disabled bulk
+  warmup instead of silently omitting those schema fields.
 
 ## [0.1.0]
 

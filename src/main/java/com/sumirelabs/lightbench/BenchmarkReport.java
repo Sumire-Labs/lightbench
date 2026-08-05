@@ -37,7 +37,8 @@ import net.minecraftforge.fml.common.ModContainer;
 final class BenchmarkReport {
 
     private static final int SCHEMA_VERSION = 1;
-    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    private static final Gson GSON =
+            new GsonBuilder().serializeNulls().setPrettyPrinting().create();
     private static final DateTimeFormatter FILE_TIME =
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS'Z'", Locale.ROOT).withZone(ZoneOffset.UTC);
 
@@ -158,8 +159,12 @@ final class BenchmarkReport {
                 world.getSaveHandler().getWorldDirectory().toPath().resolve("lightbench-results");
         final String prefix = FILE_TIME.format(Instant.now()) + "-" + mode + "-"
                 + engine.name().toLowerCase(Locale.ROOT) + "-dim" + world.provider.getDimension();
-        final byte[] json = (GSON.toJson(root) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
+        final byte[] json = serializeJson(root);
         return writeUniqueJson(directory, prefix, json);
+    }
+
+    static byte[] serializeJson(final JsonObject root) {
+        return (GSON.toJson(root) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
     }
 
     static Path writeUniqueJson(final Path directory, final String prefix, final byte[] json) throws IOException {

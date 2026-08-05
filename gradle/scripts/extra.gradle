@@ -9,3 +9,39 @@ apply from: 'gradle/scripts/helpers.gradle'
  *
  * Helper functions (propertyString/propertyBool/propertyStringList/interpolate/...) are available.
  */
+
+sourceSets {
+    benchmarkTools {
+        java.srcDir 'src/benchmarkTools/java'
+        compileClasspath += main.compileClasspath
+        runtimeClasspath += output + compileClasspath + main.runtimeClasspath
+    }
+    test {
+        compileClasspath += benchmarkTools.output
+        runtimeClasspath += benchmarkTools.output
+    }
+}
+
+tasks.register('compareBenchmarks', JavaExec) {
+    group = 'verification'
+    description = 'Strictly validate and compare saved Lightbench JSON results.'
+    dependsOn benchmarkToolsClasses
+    classpath = sourceSets.benchmarkTools.runtimeClasspath
+    mainClass.set('com.sumirelabs.lightbench.BenchmarkCompare')
+
+    doFirst {
+        if (!project.hasProperty('benchmarkResults')) {
+            throw new GradleException(
+                    'Pass -PbenchmarkResults=<file-or-directory>; separate multiple paths with the platform path separator.')
+        }
+
+        def commandArguments = ['--results', project.property('benchmarkResults').toString()]
+        if (project.hasProperty('benchmarkOutput')) {
+            commandArguments += ['--output', project.property('benchmarkOutput').toString()]
+        }
+        if (project.hasProperty('benchmarkIgnoreMods')) {
+            commandArguments += ['--ignore-mods', project.property('benchmarkIgnoreMods').toString()]
+        }
+        setArgs(commandArguments)
+    }
+}
