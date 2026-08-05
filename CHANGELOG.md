@@ -22,6 +22,8 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
   distributions, and corrected percentile indexing to use the nearest-rank definition.
 - Enabled JVM thread CPU accounting before reporting Pulsar worker time instead of silently reporting
   zero when the supported counter started disabled.
+- Added dedicated/integrated server metadata to result files and documented generation as an
+  end-to-end world-generation workload rather than a lighting-only microbenchmark.
 
 ### Added
 
@@ -40,6 +42,12 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
   Markdown summaries only for comparable results.
 - Added checks that repeated measurements use the same engine JAR and that raw chunk traversal is
   identical across runs, while allowing the selected light-engine mod to differ between groups.
+- Added the controlled `/lightbench updates` benchmark: 20 warmup pairs followed by 200 measured
+  samples for Sky removal/addition and Glowstone addition/removal on a verified 64x64 platform.
+- Added per-edit correctness probes, raw submission/barrier/completion samples, measurement-window GC
+  deltas, and engine-specific completion adapters for Vanilla, Alfheim and Pulsar update runs.
+- Extended strict offline comparison with update-protocol, preflight, adapter, raw-sample and
+  distribution validation, plus phase-oriented CSV and Markdown reports suitable for graphs.
 
 ### Fixed
 

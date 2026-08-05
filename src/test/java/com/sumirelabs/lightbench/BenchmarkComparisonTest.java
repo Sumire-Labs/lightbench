@@ -239,6 +239,212 @@ class BenchmarkComparisonTest {
         assertEquals(0, exitCode);
     }
 
+    @Test
+    void compatibleUpdateRunsProducePhaseRowsAndEngineSummaries(@TempDir final Path temporary) throws Exception {
+        final Path vanilla = write(temporary.resolve("updates-vanilla.json"), updateResult("vanilla", 1_000_000L));
+        final Path alfheim = write(temporary.resolve("updates-alfheim.json"), updateResult("alfheim", 700_000L));
+        final Path pulsar = write(temporary.resolve("updates-pulsar.json"), updateResult("pulsar", 500_000L));
+
+        final BenchmarkComparison.Result comparison =
+                BenchmarkComparison.compare(Arrays.asList(vanilla, alfheim, pulsar), Collections.emptySet());
+        final String markdown = comparison.renderMarkdown();
+        final String csv = comparison.renderCsv();
+
+        assertEquals(3, comparison.runCount());
+        assertEquals(13, csv.lines().count());
+        assertTrue(csv.startsWith("run,source_file,engine,started_at_utc,mode,seed,dimension_id,phase"));
+        assertTrue(csv.contains("completion_p50_nanos"));
+        assertTrue(csv.contains("\"sky_remove\""));
+        assertTrue(csv.contains("\"block_remove\""));
+        assertTrue(markdown.contains("# Lightbench light-update comparison"));
+        assertTrue(markdown.contains("### `sky_remove`"));
+        assertTrue(markdown.contains("### `block_place`"));
+        assertTrue(markdown.contains("Completion is the primary cross-engine metric"));
+        assertFalse(markdown.contains("NaN"));
+    }
+
+    @Test
+    void updateSummaryIsRecalculatedFromRawSamples(@TempDir final Path temporary) throws Exception {
+        final JsonObject corrupt = updateResult("vanilla", 1_000_000L);
+        updatePhase(corrupt, 0).getAsJsonObject("completion_summary_nanos").addProperty("p95", 1);
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("corrupt.json"), corrupt),
+                                write(temporary.resolve("valid.json"), updateResult("pulsar", 500_000L))),
+                        Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("completion_summary_nanos/p95"));
+        assertTrue(exception.getMessage().contains("raw p95"));
+    }
+
+    @Test
+    void unverifiedUpdateSampleIsRejected(@TempDir final Path temporary) throws Exception {
+        final JsonObject corrupt = updateResult("vanilla", 1_000_000L);
+        updatePhase(corrupt, 1)
+                .getAsJsonArray("samples")
+                .get(17)
+                .getAsJsonObject()
+                .addProperty("light_verified", false);
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("corrupt.json"), corrupt),
+                                write(temporary.resolve("valid.json"), updateResult("pulsar", 500_000L))),
+                        Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("light_verified"));
+    }
+
+    @Test
+    void updateCompletionMustContainSubmissionAndBarrierIntervals(@TempDir final Path temporary) throws Exception {
+        final JsonObject corrupt = updateResult("pulsar", 500_000L);
+        updatePhase(corrupt, 2)
+                .getAsJsonArray("samples")
+                .get(0)
+                .getAsJsonObject()
+                .addProperty("completion_nanos", 1);
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("corrupt.json"), corrupt),
+                                write(temporary.resolve("valid.json"), updateResult("vanilla", 1_000_000L))),
+                        Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("submission_nanos + barrier_nanos"));
+    }
+
+    @Test
+    void updateAdapterMustMatchTheDetectedEngine(@TempDir final Path temporary) throws Exception {
+        final JsonObject corrupt = updateResult("pulsar", 500_000L);
+        corrupt.getAsJsonObject("benchmark").addProperty("completion_adapter", "pulsar_global_pending_poll");
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("corrupt.json"), corrupt),
+                                write(temporary.resolve("valid.json"), updateResult("vanilla", 1_000_000L))),
+                        Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("pulsar_chunk_future_then_global_pending"));
+    }
+
+    @Test
+    void updateEngineSpecificMeasurementsAndNullablePairsAreValidated(@TempDir final Path temporary) throws Exception {
+        final JsonObject vanillaBarrier = updateResult("vanilla", 1_000_000L);
+        updatePhase(vanillaBarrier, 0)
+                .getAsJsonArray("samples")
+                .get(0)
+                .getAsJsonObject()
+                .addProperty("barrier_nanos", 1);
+        final BenchmarkComparison.InvalidResultException barrierException = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("vanilla-barrier.json"), vanillaBarrier),
+                                write(temporary.resolve("valid-pulsar.json"), updateResult("pulsar", 500_000L))),
+                        Collections.emptySet()));
+        assertTrue(barrierException.getMessage().contains("vanilla_inline"));
+
+        final JsonObject alfheimWorker = updateResult("alfheim", 700_000L);
+        alfheimWorker.getAsJsonObject("benchmark").addProperty("pulsar_worker_cpu_nanos", 1);
+        final BenchmarkComparison.InvalidResultException workerException = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("alfheim-worker.json"), alfheimWorker),
+                                write(temporary.resolve("valid-vanilla.json"), updateResult("vanilla", 1_000_000L))),
+                        Collections.emptySet()));
+        assertTrue(workerException.getMessage().contains("engines other than Pulsar"));
+
+        final JsonObject partialGc = updateResult("pulsar", 500_000L);
+        partialGc
+                .getAsJsonObject("benchmark")
+                .getAsJsonObject("measurement_gc")
+                .add("collection_time_millis_delta", com.google.gson.JsonNull.INSTANCE);
+        final BenchmarkComparison.InvalidResultException gcException = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("partial-gc.json"), partialGc),
+                                write(temporary.resolve("another-vanilla.json"), updateResult("vanilla", 1_000_000L))),
+                        Collections.emptySet()));
+        assertTrue(gcException.getMessage().contains("either both be integers or both be null"));
+    }
+
+    @Test
+    void updateCorrectnessProbePlanMustMatchTheFixedProtocol(@TempDir final Path temporary) throws Exception {
+        final JsonObject corrupt = updateResult("vanilla", 1_000_000L);
+        corrupt.getAsJsonObject("benchmark")
+                .getAsJsonObject("plan")
+                .getAsJsonArray("workloads")
+                .get(0)
+                .getAsJsonObject()
+                .getAsJsonArray("open_expected_light")
+                .get(3)
+                .getAsJsonObject()
+                .addProperty("level", 2);
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("corrupt-plan.json"), corrupt),
+                                write(temporary.resolve("valid.json"), updateResult("pulsar", 500_000L))),
+                        Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("fixed expected light level"));
+    }
+
+    @Test
+    void updatePreflightMustCoverTheEntireControlledPlatform(@TempDir final Path temporary) throws Exception {
+        final JsonObject corrupt = updateResult("vanilla", 1_000_000L);
+        corrupt.getAsJsonObject("benchmark").getAsJsonObject("preflight").addProperty("checked_air_blocks", 1);
+
+        final BenchmarkComparison.InvalidResultException exception = assertThrows(
+                BenchmarkComparison.InvalidResultException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("corrupt.json"), corrupt),
+                                write(temporary.resolve("valid.json"), updateResult("pulsar", 500_000L))),
+                        Collections.emptySet()));
+        assertTrue(exception.getMessage().contains("every clear-air block"));
+    }
+
+    @Test
+    void updateServerModeMustMatchButGcObservationsMayDiffer(@TempDir final Path temporary) throws Exception {
+        final JsonObject vanillaResult = updateResult("vanilla", 1_000_000L);
+        final JsonObject pulsarResult = updateResult("pulsar", 500_000L);
+        final JsonObject measurementGc =
+                pulsarResult.getAsJsonObject("benchmark").getAsJsonObject("measurement_gc");
+        measurementGc.addProperty("collection_count_delta", 3);
+        measurementGc.addProperty("collection_time_millis_delta", 8);
+        assertEquals(
+                2,
+                BenchmarkComparison.compare(
+                                Arrays.asList(
+                                        write(temporary.resolve("vanilla.json"), vanillaResult),
+                                        write(temporary.resolve("pulsar.json"), pulsarResult)),
+                                Collections.emptySet())
+                        .runCount());
+
+        final JsonObject integratedResult = updateResult("pulsar", 500_000L);
+        integratedResult
+                .getAsJsonObject("environment")
+                .getAsJsonObject("server")
+                .addProperty("dedicated", false);
+        final BenchmarkComparison.IncompatibleResultsException exception = assertThrows(
+                BenchmarkComparison.IncompatibleResultsException.class,
+                () -> BenchmarkComparison.compare(
+                        Arrays.asList(
+                                write(temporary.resolve("dedicated.json"), updateResult("vanilla", 1_000_000L)),
+                                write(temporary.resolve("integrated.json"), integratedResult)),
+                        Collections.emptySet()));
+        assertTrue(exception.mismatches().stream().anyMatch(message -> message.contains("/environment/server")));
+    }
+
     private static JsonObject result(
             final String engine, final long testTotalNanos, final String seed, final String configHash) {
         final JsonObject root = new JsonObject();
@@ -339,6 +545,210 @@ class BenchmarkComparisonTest {
         }
         root.add("mods", mods);
         return root;
+    }
+
+    private static JsonObject updateResult(final String engine, final long timingBase) {
+        final JsonObject root = result(engine, 1_000_000_000L, "123", SHA_A);
+        final JsonObject benchmark = new JsonObject();
+        benchmark.addProperty("mode", "updates");
+        benchmark.addProperty("started_at_utc", "2026-08-05T00:00:00Z");
+        benchmark.addProperty("completed_at_utc", "2026-08-05T00:00:01Z");
+        benchmark.addProperty("lightbench_version", "test");
+        benchmark.addProperty("engine", engine);
+        benchmark.addProperty("seed", "123");
+        benchmark.addProperty("time_unit", "nanoseconds");
+        benchmark.addProperty("reporting_excluded_from_measurements", true);
+        if ("pulsar".equals(engine)) {
+            benchmark.addProperty("completion_adapter", "pulsar_chunk_future_then_global_pending");
+            benchmark.addProperty("verification_reader", "world_stored_light");
+        } else if ("alfheim".equals(engine)) {
+            benchmark.addProperty("completion_adapter", "alfheim_process_light_updates");
+            benchmark.addProperty("verification_reader", "alfheim_cached_light");
+        } else {
+            benchmark.addProperty("completion_adapter", "vanilla_inline");
+            benchmark.addProperty("verification_reader", "world_stored_light");
+        }
+
+        final JsonObject dimension = new JsonObject();
+        dimension.addProperty("id", 0);
+        dimension.addProperty("name", "overworld");
+        dimension.addProperty("provider_class", "test.WorldProvider");
+        dimension.addProperty("has_sky_light", true);
+        benchmark.add("dimension", dimension);
+
+        final JsonObject preflight = new JsonObject();
+        preflight.addProperty("controlled_environment", true);
+        preflight.addProperty("checked_columns", 4096);
+        preflight.addProperty("checked_air_blocks", 1_024_000L);
+        preflight.addProperty("loaded_chunks", 49);
+        preflight.addProperty("floor_y", 3);
+        preflight.addProperty("floor_block", "minecraft:grass");
+        preflight.addProperty("floor_state", "minecraft:grass[snowy=false]");
+        preflight.addProperty("floor_meta", 0);
+        preflight.addProperty("platform_normalized", true);
+        preflight.addProperty("initial_light_verified", true);
+        benchmark.add("preflight", preflight);
+        benchmark.add("plan", updatePlan());
+
+        final JsonObject measurementGc = new JsonObject();
+        measurementGc.addProperty("collection_count_delta", 0);
+        measurementGc.addProperty("collection_time_millis_delta", 0);
+        benchmark.add("measurement_gc", measurementGc);
+        if ("pulsar".equals(engine)) {
+            benchmark.addProperty("pulsar_worker_cpu_nanos", timingBase * 100L);
+        } else {
+            benchmark.add("pulsar_worker_cpu_nanos", com.google.gson.JsonNull.INSTANCE);
+        }
+
+        final JsonArray phases = new JsonArray();
+        phases.add(updatePhase("sky_remove", "sky", "remove", 20008, 254, 20008, timingBase, engine));
+        phases.add(updatePhase("sky_place", "sky", "place", 20008, 254, 20008, timingBase * 2L, engine));
+        phases.add(updatePhase("block_place", "block", "place", 20008, 4, 20008, timingBase * 3L, engine));
+        phases.add(updatePhase("block_remove", "block", "remove", 20008, 4, 20008, timingBase * 4L, engine));
+        benchmark.add("phases", phases);
+        root.add("benchmark", benchmark);
+
+        final JsonObject environment = root.getAsJsonObject("environment");
+        final JsonObject worldSettings = environment.getAsJsonObject("world_settings");
+        worldSettings.addProperty("terrain_type", "flat");
+        worldSettings.addProperty(
+                "generator_options", "3;minecraft:bedrock,2*minecraft:dirt,minecraft:grass;1;village");
+        final JsonObject server = new JsonObject();
+        server.addProperty("dedicated", true);
+        server.addProperty("implementation_class", "test.MinecraftServer");
+        environment.add("server", server);
+        return root;
+    }
+
+    private static JsonObject updatePlan() {
+        final JsonObject plan = new JsonObject();
+        plan.addProperty("coordinate_unit", "block");
+        plan.addProperty("logical_side", "server");
+        plan.addProperty("measurement_scope", "block_state_change_and_server_light_completion");
+        plan.addProperty("primary_metric", "completion_nanos");
+        plan.addProperty("timed_interval", "before_set_block_state_to_after_completion_barrier");
+        plan.addProperty("submission_interval", "before_to_after_set_block_state");
+        plan.addProperty("barrier_interval", "engine_specific_completion_wait");
+        plan.addProperty("completion_barrier", "after_each_edit");
+        plan.addProperty("update_flags", 16);
+        plan.addProperty("warmup_pairs", 20);
+        plan.addProperty("measured_pairs", 200);
+        plan.addProperty("same_position_each_sample", true);
+        plan.addProperty("validation", "after_each_completion_outside_timed_interval");
+
+        final JsonObject platform = new JsonObject();
+        platform.addProperty("base_x", 19976);
+        platform.addProperty("base_z", 19976);
+        platform.addProperty("size_x", 64);
+        platform.addProperty("size_z", 64);
+        platform.addProperty("top_y", 254);
+        platform.addProperty("block", "minecraft:stone");
+        platform.addProperty("loaded_chunk_halo", 1);
+        platform.addProperty("minimum_clear_height", 240);
+        platform.addProperty("minimum_sample_edge_margin", 24);
+        plan.add("platform", platform);
+
+        final JsonObject floor = new JsonObject();
+        floor.addProperty("y", 3);
+        floor.addProperty("block", "minecraft:grass");
+        floor.addProperty("state", "minecraft:grass[snowy=false]");
+        floor.addProperty("meta", 0);
+        plan.add("floor", floor);
+
+        final JsonArray workloads = new JsonArray();
+        final JsonObject sky = new JsonObject();
+        sky.addProperty("light_type", "sky");
+        sky.addProperty("baseline_block", "minecraft:stone");
+        sky.addProperty("changed_block", "minecraft:air");
+        sky.add("phase_order", stringArray("sky_remove", "sky_place"));
+        sky.add("warmup_position", coordinate(20000, 254, 20000));
+        sky.add("measured_position", coordinate(20008, 254, 20008));
+        final JsonArray openExpected = new JsonArray();
+        openExpected.add(expectation(20008, 253, 20008, 15));
+        openExpected.add(expectation(20008, 128, 20008, 15));
+        openExpected.add(expectation(20008, 4, 20008, 15));
+        openExpected.add(expectation(20022, 4, 20008, 1));
+        openExpected.add(expectation(20023, 4, 20008, 0));
+        sky.add("open_expected_light", openExpected);
+        final JsonArray closedExpected = new JsonArray();
+        closedExpected.add(expectation(20008, 253, 20008, 0));
+        closedExpected.add(expectation(20008, 128, 20008, 0));
+        closedExpected.add(expectation(20008, 4, 20008, 0));
+        closedExpected.add(expectation(20022, 4, 20008, 0));
+        closedExpected.add(expectation(20023, 4, 20008, 0));
+        sky.add("closed_expected_light", closedExpected);
+        workloads.add(sky);
+
+        final JsonObject block = new JsonObject();
+        block.addProperty("light_type", "block");
+        block.addProperty("baseline_block", "minecraft:air");
+        block.addProperty("changed_block", "minecraft:glowstone");
+        block.add("phase_order", stringArray("block_place", "block_remove"));
+        block.add("warmup_position", coordinate(20000, 4, 20000));
+        block.add("measured_position", coordinate(20008, 4, 20008));
+        final JsonArray presentExpected = new JsonArray();
+        presentExpected.add(expectation(20008, 4, 20008, 15));
+        presentExpected.add(expectation(20022, 4, 20008, 1));
+        presentExpected.add(expectation(20023, 4, 20008, 0));
+        block.add("present_expected_light", presentExpected);
+        final JsonArray absentExpected = new JsonArray();
+        absentExpected.add(expectation(20008, 4, 20008, 0));
+        absentExpected.add(expectation(20022, 4, 20008, 0));
+        absentExpected.add(expectation(20023, 4, 20008, 0));
+        block.add("absent_expected_light", absentExpected);
+        workloads.add(block);
+        plan.add("workloads", workloads);
+        return plan;
+    }
+
+    private static JsonObject updatePhase(
+            final String name,
+            final String lightType,
+            final String action,
+            final int x,
+            final int y,
+            final int z,
+            final long timingBase,
+            final String engine) {
+        final long[] submission = new long[200];
+        final long[] barrier = new long[200];
+        final long[] completion = new long[200];
+        for (int index = 0; index < completion.length; ++index) {
+            submission[index] = timingBase / 10L + index;
+            barrier[index] = "vanilla".equals(engine) ? 0 : timingBase / 2L + index;
+            completion[index] = submission[index] + barrier[index] + timingBase + index;
+        }
+        return BenchmarkReport.updatePhaseToJson(
+                new UpdatePhaseResult(name, lightType, action, x, y, z, submission, barrier, completion));
+    }
+
+    private static JsonObject updatePhase(final JsonObject result, final int phaseIndex) {
+        return result.getAsJsonObject("benchmark")
+                .getAsJsonArray("phases")
+                .get(phaseIndex)
+                .getAsJsonObject();
+    }
+
+    private static JsonArray coordinate(final int x, final int y, final int z) {
+        final JsonArray coordinate = new JsonArray();
+        coordinate.add(x);
+        coordinate.add(y);
+        coordinate.add(z);
+        return coordinate;
+    }
+
+    private static JsonArray stringArray(final String first, final String second) {
+        final JsonArray result = new JsonArray();
+        result.add(first);
+        result.add(second);
+        return result;
+    }
+
+    private static JsonObject expectation(final int x, final int y, final int z, final int level) {
+        final JsonObject result = new JsonObject();
+        result.add("position", coordinate(x, y, z));
+        result.addProperty("level", level);
+        return result;
     }
 
     private static JsonObject phase(final String name, final long totalNanos, final String engine) {

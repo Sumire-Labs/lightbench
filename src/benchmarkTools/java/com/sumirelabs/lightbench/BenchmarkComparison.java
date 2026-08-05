@@ -33,7 +33,7 @@ final class BenchmarkComparison {
             Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("pulsar", "alfheim")));
     private static final Set<String> BUILTIN_RUNTIME_MOD_IDS =
             Collections.unmodifiableSet(new LinkedHashSet<>(Arrays.asList("minecraft", "mcp")));
-    private static final List<String> STRICT_PATHS = Collections.unmodifiableList(Arrays.asList(
+    private static final List<String> COMMON_STRICT_PATHS = Collections.unmodifiableList(Arrays.asList(
             "/schema_version",
             "/benchmark/mode",
             "/benchmark/lightbench_version",
@@ -41,9 +41,6 @@ final class BenchmarkComparison {
             "/benchmark/time_unit",
             "/benchmark/reporting_excluded_from_measurements",
             "/benchmark/dimension",
-            "/benchmark/preflight/halo_chunks",
-            "/benchmark/preflight/checked_chunks",
-            "/benchmark/preflight/all_ungenerated",
             "/benchmark/plan",
             "/environment/minecraft_version",
             "/environment/forge_version",
@@ -52,6 +49,13 @@ final class BenchmarkComparison {
             "/environment/operating_system",
             "/environment/world_settings",
             "/environment/config_fingerprint"));
+    private static final List<String> CHUNK_STRICT_PATHS = Collections.unmodifiableList(Arrays.asList(
+            "/benchmark/preflight/halo_chunks",
+            "/benchmark/preflight/checked_chunks",
+            "/benchmark/preflight/all_ungenerated"));
+    private static final List<String> UPDATE_STRICT_PATHS =
+            Collections.unmodifiableList(Arrays.asList("/benchmark/preflight", "/environment/server"));
+    private static final String[] UPDATE_PHASE_NAMES = {"sky_remove", "sky_place", "block_place", "block_remove"};
 
     private BenchmarkComparison() {}
 
@@ -113,7 +117,7 @@ final class BenchmarkComparison {
                     "unsupported schema " + schemaVersion + "; expected " + SUPPORTED_SCHEMA_VERSION);
         }
 
-        for (final String pointer : STRICT_PATHS) {
+        for (final String pointer : COMMON_STRICT_PATHS) {
             required(root, pointer, normalized);
         }
         if (!"nanoseconds".equals(requiredString(root, "/benchmark/time_unit", normalized))) {
@@ -125,11 +129,6 @@ final class BenchmarkComparison {
                     "/benchmark/reporting_excluded_from_measurements",
                     "must be true before results can be compared");
         }
-        if (!requiredBoolean(root, "/benchmark/preflight/all_ungenerated", normalized)) {
-            throw invalid(
-                    normalized, "/benchmark/preflight/all_ungenerated", "must be true before results can be compared");
-        }
-
         final String mode =
                 requiredNonEmptyString(root, "/benchmark/mode", normalized).toLowerCase(Locale.ROOT);
         final String engine =
@@ -153,11 +152,29 @@ final class BenchmarkComparison {
         final int dimensionId = requiredInt(root, "/benchmark/dimension/id", normalized);
         requiredNonEmptyString(root, "/benchmark/dimension/name", normalized);
         requiredNonEmptyString(root, "/benchmark/dimension/provider_class", normalized);
-        requiredBoolean(root, "/benchmark/dimension/has_sky_light", normalized);
+        final boolean hasSkyLight = requiredBoolean(root, "/benchmark/dimension/has_sky_light", normalized);
+        validateEnvironment(root, normalized);
+
+        final Map<String, JsonObject> mods = readMods(root, normalized);
+        validateDetectedEngine(engine, mods, normalized);
+        if ("updates".equals(mode)) {
+            if (!hasSkyLight) {
+                throw invalid(normalized, "/benchmark/dimension/has_sky_light", "updates results require sky light");
+            }
+            validateServerEnvironment(root, normalized);
+            return readUpdateRun(normalized, root, mods, mode, engine, startedAtUtc, seed, dimensionId);
+        }
+        if (!"gen".equals(mode) && !"bulk".equals(mode)) {
+            throw invalid(normalized, "/benchmark/mode", "only gen, bulk, and updates JSON results are comparable");
+        }
+
+        if (!requiredBoolean(root, "/benchmark/preflight/all_ungenerated", normalized)) {
+            throw invalid(
+                    normalized, "/benchmark/preflight/all_ungenerated", "must be true before results can be compared");
+        }
         nonNegativeInt(root, "/benchmark/preflight/halo_chunks", normalized);
         positiveInt(root, "/benchmark/preflight/checked_chunks", normalized);
         nonNegativeLong(root, "/benchmark/preflight/elapsed_nanos", normalized);
-        validateEnvironment(root, normalized);
 
         final JsonArray phaseJson = requiredArray(root, "/benchmark/phases", normalized);
         final Map<String, Phase> phases = new LinkedHashMap<>();
@@ -216,9 +233,85 @@ final class BenchmarkComparison {
                     "expected " + expectedPhaseCount + " planned phases but found " + phases.size());
         }
 
-        final Map<String, JsonObject> mods = readMods(root, normalized);
-        validateDetectedEngine(engine, mods, normalized);
-        return new Run(normalized, root, mods, mode, engine, startedAtUtc, seed, dimensionId, test);
+        return new Run(
+                normalized,
+                root,
+                mods,
+                mode,
+                engine,
+                startedAtUtc,
+                seed,
+                dimensionId,
+                test,
+                Collections.emptyList(),
+                null,
+                null,
+                null);
+    }
+
+    private static Run readUpdateRun(
+            final Path source,
+            final JsonObject root,
+            final Map<String, JsonObject> mods,
+            final String mode,
+            final String engine,
+            final String startedAtUtc,
+            final String seed,
+            final int dimensionId)
+            throws InvalidResultException {
+        final UpdatePlan plan = validateUpdatePlan(requiredObject(root, "/benchmark/plan", source), source);
+        validateUpdatePreflight(root, plan, source);
+        validateUpdateAdapters(root, engine, source);
+
+        final NullableMeasurement gcCollections =
+                nullableNonNegativeLong(root, "/benchmark/measurement_gc/collection_count_delta", source);
+        final NullableMeasurement gcTime =
+                nullableNonNegativeLong(root, "/benchmark/measurement_gc/collection_time_millis_delta", source);
+        if (gcCollections.present != gcTime.present) {
+            throw invalid(
+                    source,
+                    "/benchmark/measurement_gc",
+                    "collection count and time must either both be integers or both be null");
+        }
+        final NullableMeasurement workerCpu =
+                nullableNonNegativeLong(root, "/benchmark/pulsar_worker_cpu_nanos", source);
+        if (!"pulsar".equals(engine) && workerCpu.present) {
+            throw invalid(source, "/benchmark/pulsar_worker_cpu_nanos", "must be null for engines other than Pulsar");
+        }
+
+        final JsonArray phaseJson = requiredArray(root, "/benchmark/phases", source);
+        if (phaseJson.size() != plan.phases.size()) {
+            throw invalid(
+                    source,
+                    "/benchmark/phases",
+                    "expected " + plan.phases.size() + " fixed update phases but found " + phaseJson.size());
+        }
+        final List<UpdatePhase> phases = new ArrayList<>(phaseJson.size());
+        for (int index = 0; index < phaseJson.size(); ++index) {
+            final String path = "/benchmark/phases/" + index;
+            phases.add(readUpdatePhase(
+                    requiredObject(phaseJson.get(index), path, source),
+                    path,
+                    source,
+                    plan.phases.get(index),
+                    plan.measuredPairs,
+                    engine));
+        }
+
+        return new Run(
+                source,
+                root,
+                mods,
+                mode,
+                engine,
+                startedAtUtc,
+                seed,
+                dimensionId,
+                null,
+                phases,
+                workerCpu.value,
+                gcCollections.value,
+                gcTime.value);
     }
 
     private static void validateEnvironment(final JsonObject root, final Path source) throws InvalidResultException {
@@ -269,6 +362,13 @@ final class BenchmarkComparison {
         if (!isSha256(sha256)) {
             throw invalid(source, "/environment/config_fingerprint/sha256", "must be 64 lowercase hexadecimal digits");
         }
+    }
+
+    private static void validateServerEnvironment(final JsonObject root, final Path source)
+            throws InvalidResultException {
+        final JsonObject server = requiredObject(root, "/environment/server", source);
+        requiredBoolean(server, "/environment/server/dedicated", source);
+        requiredNonEmptyString(server, "/environment/server/implementation_class", source);
     }
 
     private static void validateStringArray(final JsonArray values, final String path, final Path source)
@@ -343,6 +443,420 @@ final class BenchmarkComparison {
         }
 
         throw invalid(source, "/benchmark/mode", "only gen and bulk JSON results are comparable");
+    }
+
+    private static UpdatePlan validateUpdatePlan(final JsonObject plan, final Path source)
+            throws InvalidResultException {
+        requireStringValue(plan, "/benchmark/plan/coordinate_unit", "block", source);
+        requireStringValue(plan, "/benchmark/plan/logical_side", "server", source);
+        requireStringValue(
+                plan, "/benchmark/plan/measurement_scope", "block_state_change_and_server_light_completion", source);
+        requireStringValue(plan, "/benchmark/plan/primary_metric", "completion_nanos", source);
+        requireStringValue(
+                plan, "/benchmark/plan/timed_interval", "before_set_block_state_to_after_completion_barrier", source);
+        requireStringValue(plan, "/benchmark/plan/submission_interval", "before_to_after_set_block_state", source);
+        requireStringValue(plan, "/benchmark/plan/barrier_interval", "engine_specific_completion_wait", source);
+        requireStringValue(plan, "/benchmark/plan/completion_barrier", "after_each_edit", source);
+        requireIntValue(plan, "/benchmark/plan/update_flags", 16, source);
+        requireIntValue(plan, "/benchmark/plan/warmup_pairs", 20, source);
+        final int measuredPairs = requiredInt(plan, "/benchmark/plan/measured_pairs", source);
+        if (measuredPairs != 200) {
+            throw invalid(source, "/benchmark/plan/measured_pairs", "must be 200 for the supported update protocol");
+        }
+        requireBooleanValue(plan, "/benchmark/plan/same_position_each_sample", true, source);
+        requireStringValue(plan, "/benchmark/plan/validation", "after_each_completion_outside_timed_interval", source);
+
+        final JsonObject platform = requiredObject(plan, "/benchmark/plan/platform", source);
+        final int baseX = requiredInt(platform, "/benchmark/plan/platform/base_x", source);
+        final int baseZ = requiredInt(platform, "/benchmark/plan/platform/base_z", source);
+        if (baseX != 19976 || baseZ != 19976) {
+            throw invalid(
+                    source, "/benchmark/plan/platform", "must use the fixed platform centered on block x/z 20008");
+        }
+        final int sizeX = positiveInt(platform, "/benchmark/plan/platform/size_x", source);
+        final int sizeZ = positiveInt(platform, "/benchmark/plan/platform/size_z", source);
+        if (sizeX != 64 || sizeZ != 64) {
+            throw invalid(source, "/benchmark/plan/platform", "must be the fixed 64x64 update platform");
+        }
+        final int topY = requiredInt(platform, "/benchmark/plan/platform/top_y", source);
+        if (topY != 254) {
+            throw invalid(source, "/benchmark/plan/platform/top_y", "must be 254");
+        }
+        requireStringValue(platform, "/benchmark/plan/platform/block", "minecraft:stone", source);
+        final int chunkHalo = nonNegativeInt(platform, "/benchmark/plan/platform/loaded_chunk_halo", source);
+        if (chunkHalo != 1) {
+            throw invalid(source, "/benchmark/plan/platform/loaded_chunk_halo", "must be one chunk");
+        }
+        final int minimumClearHeight = positiveInt(platform, "/benchmark/plan/platform/minimum_clear_height", source);
+        if (minimumClearHeight != 240) {
+            throw invalid(source, "/benchmark/plan/platform/minimum_clear_height", "must be 240 blocks");
+        }
+        final int declaredEdgeMargin =
+                positiveInt(platform, "/benchmark/plan/platform/minimum_sample_edge_margin", source);
+        if (declaredEdgeMargin < 24) {
+            throw invalid(
+                    source,
+                    "/benchmark/plan/platform/minimum_sample_edge_margin",
+                    "must leave at least 24 blocks around every sample center");
+        }
+
+        final JsonObject floor = requiredObject(plan, "/benchmark/plan/floor", source);
+        final int floorY = requiredInt(floor, "/benchmark/plan/floor/y", source);
+        if (floorY < 0) {
+            throw invalid(source, "/benchmark/plan/floor/y", "must be a valid non-negative world height");
+        }
+        final String floorBlock = requiredNonEmptyString(floor, "/benchmark/plan/floor/block", source);
+        final String floorState = requiredNonEmptyString(floor, "/benchmark/plan/floor/state", source);
+        final int floorMeta = requiredInt(floor, "/benchmark/plan/floor/meta", source);
+        if (floorMeta < 0 || floorMeta > 15) {
+            throw invalid(source, "/benchmark/plan/floor/meta", "must be a Minecraft 1.12 block metadata value");
+        }
+        final long clearHeight = (long) topY - floorY - 1L;
+        if (clearHeight < minimumClearHeight) {
+            throw invalid(
+                    source,
+                    "/benchmark/plan/floor/y",
+                    "does not leave the declared minimum clear height below the platform");
+        }
+
+        final JsonArray workloads = requiredArray(plan, "/benchmark/plan/workloads", source);
+        if (workloads.size() != 2) {
+            throw invalid(source, "/benchmark/plan/workloads", "must contain exactly the sky and block workloads");
+        }
+        final JsonObject sky = requiredObject(workloads.get(0), "/benchmark/plan/workloads/0", source);
+        final JsonObject block = requiredObject(workloads.get(1), "/benchmark/plan/workloads/1", source);
+
+        requireStringValue(sky, "/benchmark/plan/workloads/0/light_type", "sky", source);
+        requireStringValue(sky, "/benchmark/plan/workloads/0/baseline_block", "minecraft:stone", source);
+        requireStringValue(sky, "/benchmark/plan/workloads/0/changed_block", "minecraft:air", source);
+        validateStringArray(
+                sky, "/benchmark/plan/workloads/0/phase_order", new String[] {"sky_remove", "sky_place"}, source);
+        final int[] skyWarmup = requiredBlockCoordinate(sky, "/benchmark/plan/workloads/0/warmup_position", source);
+        final int[] skyMeasured = requiredBlockCoordinate(sky, "/benchmark/plan/workloads/0/measured_position", source);
+        if (skyWarmup[0] != 20000 || skyWarmup[2] != 20000 || skyMeasured[0] != 20008 || skyMeasured[2] != 20008) {
+            throw invalid(
+                    source, "/benchmark/plan/workloads/0", "must use the fixed warmup and measured x/z positions");
+        }
+        if (skyWarmup[1] != topY || skyMeasured[1] != topY) {
+            throw invalid(source, "/benchmark/plan/workloads/0", "sky edits must occur in the fixed platform layer");
+        }
+
+        requireStringValue(block, "/benchmark/plan/workloads/1/light_type", "block", source);
+        requireStringValue(block, "/benchmark/plan/workloads/1/baseline_block", "minecraft:air", source);
+        requireStringValue(block, "/benchmark/plan/workloads/1/changed_block", "minecraft:glowstone", source);
+        validateStringArray(
+                block, "/benchmark/plan/workloads/1/phase_order", new String[] {"block_place", "block_remove"}, source);
+        final int[] blockWarmup = requiredBlockCoordinate(block, "/benchmark/plan/workloads/1/warmup_position", source);
+        final int[] blockMeasured =
+                requiredBlockCoordinate(block, "/benchmark/plan/workloads/1/measured_position", source);
+        if (blockWarmup[1] != floorY + 1 || blockMeasured[1] != floorY + 1) {
+            throw invalid(
+                    source,
+                    "/benchmark/plan/workloads/1",
+                    "block-light edits must occur immediately above the uniform floor");
+        }
+        if (skyWarmup[0] != blockWarmup[0]
+                || skyWarmup[2] != blockWarmup[2]
+                || skyMeasured[0] != blockMeasured[0]
+                || skyMeasured[2] != blockMeasured[2]) {
+            throw invalid(
+                    source,
+                    "/benchmark/plan/workloads",
+                    "sky and block workloads must share their warmup and measured x/z positions");
+        }
+        if (Arrays.equals(skyWarmup, skyMeasured)) {
+            throw invalid(
+                    source, "/benchmark/plan/workloads/0/warmup_position", "must differ from the measured position");
+        }
+
+        final int actualEdgeMargin = Math.min(
+                platformEdgeMargin(skyWarmup, baseX, baseZ, sizeX, sizeZ, source),
+                platformEdgeMargin(skyMeasured, baseX, baseZ, sizeX, sizeZ, source));
+        if (declaredEdgeMargin != actualEdgeMargin) {
+            throw invalid(
+                    source,
+                    "/benchmark/plan/platform/minimum_sample_edge_margin",
+                    "does not match the warmup and measured positions");
+        }
+
+        final int middleY = floorY + (topY - floorY) / 2;
+        final int east14 = safeIntAdd(skyMeasured[0], 14, source, "/benchmark/plan/workloads/0");
+        final int east15 = safeIntAdd(skyMeasured[0], 15, source, "/benchmark/plan/workloads/0");
+        final int[][] skyProbePositions = {
+            {skyMeasured[0], topY - 1, skyMeasured[2]},
+            {skyMeasured[0], middleY, skyMeasured[2]},
+            {skyMeasured[0], floorY + 1, skyMeasured[2]},
+            {east14, floorY + 1, skyMeasured[2]},
+            {east15, floorY + 1, skyMeasured[2]}
+        };
+        validateLightExpectations(
+                sky,
+                "/benchmark/plan/workloads/0/open_expected_light",
+                skyProbePositions,
+                new int[] {15, 15, 15, 1, 0},
+                source);
+        validateLightExpectations(
+                sky,
+                "/benchmark/plan/workloads/0/closed_expected_light",
+                skyProbePositions,
+                new int[] {0, 0, 0, 0, 0},
+                source);
+
+        final int blockEast14 = safeIntAdd(blockMeasured[0], 14, source, "/benchmark/plan/workloads/1");
+        final int blockEast15 = safeIntAdd(blockMeasured[0], 15, source, "/benchmark/plan/workloads/1");
+        final int[][] blockProbePositions = {
+            blockMeasured.clone(),
+            {blockEast14, blockMeasured[1], blockMeasured[2]},
+            {blockEast15, blockMeasured[1], blockMeasured[2]}
+        };
+        validateLightExpectations(
+                block,
+                "/benchmark/plan/workloads/1/present_expected_light",
+                blockProbePositions,
+                new int[] {15, 1, 0},
+                source);
+        validateLightExpectations(
+                block,
+                "/benchmark/plan/workloads/1/absent_expected_light",
+                blockProbePositions,
+                new int[] {0, 0, 0},
+                source);
+
+        final List<UpdatePhaseSpec> phases = Arrays.asList(
+                new UpdatePhaseSpec("sky_remove", "sky", "remove", skyMeasured),
+                new UpdatePhaseSpec("sky_place", "sky", "place", skyMeasured),
+                new UpdatePhaseSpec("block_place", "block", "place", blockMeasured),
+                new UpdatePhaseSpec("block_remove", "block", "remove", blockMeasured));
+        return new UpdatePlan(
+                measuredPairs,
+                baseX,
+                baseZ,
+                sizeX,
+                sizeZ,
+                topY,
+                chunkHalo,
+                floorY,
+                floorBlock,
+                floorState,
+                floorMeta,
+                phases);
+    }
+
+    private static void validateStringArray(
+            final JsonObject root, final String path, final String[] expected, final Path source)
+            throws InvalidResultException {
+        final JsonArray actual = requiredArray(root, path, source);
+        if (actual.size() != expected.length) {
+            throw invalid(source, path, "must contain exactly " + expected.length + " entries");
+        }
+        for (int index = 0; index < expected.length; ++index) {
+            final JsonElement element = actual.get(index);
+            if (!element.isJsonPrimitive()
+                    || !element.getAsJsonPrimitive().isString()
+                    || !expected[index].equals(element.getAsString())) {
+                throw invalid(source, path + "/" + index, "must be " + expected[index]);
+            }
+        }
+    }
+
+    private static void validateLightExpectations(
+            final JsonObject workload,
+            final String path,
+            final int[][] expectedPositions,
+            final int[] expectedLevels,
+            final Path source)
+            throws InvalidResultException {
+        final JsonArray expectations = requiredArray(workload, path, source);
+        if (expectations.size() != expectedPositions.length || expectedPositions.length != expectedLevels.length) {
+            throw invalid(source, path, "has the wrong number of fixed correctness probes");
+        }
+        for (int index = 0; index < expectations.size(); ++index) {
+            final String itemPath = path + "/" + index;
+            final JsonObject expectation = requiredObject(expectations.get(index), itemPath, source);
+            final int[] position = requiredBlockCoordinate(expectation, itemPath + "/position", source);
+            if (!Arrays.equals(expectedPositions[index], position)) {
+                throw invalid(source, itemPath + "/position", "does not match the fixed correctness probe");
+            }
+            final int level = requiredInt(expectation, itemPath + "/level", source);
+            if (level != expectedLevels[index]) {
+                throw invalid(source, itemPath + "/level", "does not match the fixed expected light level");
+            }
+        }
+    }
+
+    private static int platformEdgeMargin(
+            final int[] position, final int baseX, final int baseZ, final int sizeX, final int sizeZ, final Path source)
+            throws InvalidResultException {
+        final long maximumX = (long) baseX + sizeX - 1L;
+        final long maximumZ = (long) baseZ + sizeZ - 1L;
+        final long margin = Math.min(
+                Math.min((long) position[0] - baseX, maximumX - position[0]),
+                Math.min((long) position[2] - baseZ, maximumZ - position[2]));
+        if (margin < 0 || margin > Integer.MAX_VALUE) {
+            throw invalid(source, "/benchmark/plan/workloads", "sample position is outside the platform");
+        }
+        return (int) margin;
+    }
+
+    private static void validateUpdatePreflight(final JsonObject root, final UpdatePlan plan, final Path source)
+            throws InvalidResultException {
+        requireBooleanValue(root, "/benchmark/preflight/controlled_environment", true, source);
+        requireBooleanValue(root, "/benchmark/preflight/platform_normalized", true, source);
+        requireBooleanValue(root, "/benchmark/preflight/initial_light_verified", true, source);
+
+        final long expectedColumns = (long) plan.sizeX * plan.sizeZ;
+        final int checkedColumns = positiveInt(root, "/benchmark/preflight/checked_columns", source);
+        if (checkedColumns != expectedColumns) {
+            throw invalid(source, "/benchmark/preflight/checked_columns", "does not equal the complete platform area");
+        }
+        final long clearHeight = (long) plan.topY - plan.floorY - 1L;
+        final long expectedAirBlocks;
+        try {
+            expectedAirBlocks = Math.multiplyExact(expectedColumns, clearHeight);
+        } catch (final ArithmeticException e) {
+            throw invalid(source, "/benchmark/preflight/checked_air_blocks", "expected count overflows");
+        }
+        final long checkedAirBlocks = positiveLong(root, "/benchmark/preflight/checked_air_blocks", source);
+        if (checkedAirBlocks != expectedAirBlocks) {
+            throw invalid(
+                    source,
+                    "/benchmark/preflight/checked_air_blocks",
+                    "does not equal every clear-air block below the platform");
+        }
+
+        final long maximumX = (long) plan.baseX + plan.sizeX - 1L;
+        final long maximumZ = (long) plan.baseZ + plan.sizeZ - 1L;
+        if (maximumX > Integer.MAX_VALUE || maximumZ > Integer.MAX_VALUE) {
+            throw invalid(source, "/benchmark/plan/platform", "platform coordinates exceed the block range");
+        }
+        final long minimumChunkX = Math.floorDiv((long) plan.baseX, 16L) - plan.chunkHalo;
+        final long maximumChunkX = Math.floorDiv(maximumX, 16L) + plan.chunkHalo;
+        final long minimumChunkZ = Math.floorDiv((long) plan.baseZ, 16L) - plan.chunkHalo;
+        final long maximumChunkZ = Math.floorDiv(maximumZ, 16L) + plan.chunkHalo;
+        final long expectedLoadedChunks;
+        try {
+            expectedLoadedChunks = Math.multiplyExact(
+                    Math.addExact(Math.subtractExact(maximumChunkX, minimumChunkX), 1L),
+                    Math.addExact(Math.subtractExact(maximumChunkZ, minimumChunkZ), 1L));
+        } catch (final ArithmeticException e) {
+            throw invalid(source, "/benchmark/preflight/loaded_chunks", "expected chunk count overflows");
+        }
+        if (positiveInt(root, "/benchmark/preflight/loaded_chunks", source) != expectedLoadedChunks) {
+            throw invalid(
+                    source,
+                    "/benchmark/preflight/loaded_chunks",
+                    "does not equal the platform footprint plus its declared halo");
+        }
+
+        if (requiredInt(root, "/benchmark/preflight/floor_y", source) != plan.floorY
+                || !requiredNonEmptyString(root, "/benchmark/preflight/floor_block", source)
+                        .equals(plan.floorBlock)
+                || !requiredNonEmptyString(root, "/benchmark/preflight/floor_state", source)
+                        .equals(plan.floorState)
+                || requiredInt(root, "/benchmark/preflight/floor_meta", source) != plan.floorMeta) {
+            throw invalid(source, "/benchmark/preflight", "floor metadata does not match the benchmark plan");
+        }
+    }
+
+    private static void validateUpdateAdapters(final JsonObject root, final String engine, final Path source)
+            throws InvalidResultException {
+        final String expectedBarrier;
+        final String expectedReader;
+        if ("vanilla".equals(engine)) {
+            expectedBarrier = "vanilla_inline";
+            expectedReader = "world_stored_light";
+        } else if ("alfheim".equals(engine)) {
+            expectedBarrier = "alfheim_process_light_updates";
+            expectedReader = "alfheim_cached_light";
+        } else if ("pulsar".equals(engine)) {
+            expectedBarrier = "pulsar_chunk_future_then_global_pending";
+            expectedReader = "world_stored_light";
+        } else {
+            throw invalid(
+                    source,
+                    "/benchmark/engine",
+                    "updates comparison supports only vanilla, Alfheim, and Pulsar completion adapters");
+        }
+        requireStringValue(root, "/benchmark/completion_adapter", expectedBarrier, source);
+        requireStringValue(root, "/benchmark/verification_reader", expectedReader, source);
+    }
+
+    private static UpdatePhase readUpdatePhase(
+            final JsonObject phase,
+            final String path,
+            final Path source,
+            final UpdatePhaseSpec expected,
+            final int measuredPairs,
+            final String engine)
+            throws InvalidResultException {
+        requireStringValue(phase, path + "/name", expected.name, source);
+        requireStringValue(phase, path + "/light_type", expected.lightType, source);
+        requireStringValue(phase, path + "/action", expected.action, source);
+        final int[] position = requiredBlockCoordinate(phase, path + "/position", source);
+        if (!Arrays.equals(position, expected.position)) {
+            throw invalid(source, path + "/position", "does not match the measured position in the plan");
+        }
+        final int sampleCount = positiveInt(phase, path + "/sample_count", source);
+        if (sampleCount != measuredPairs) {
+            throw invalid(source, path + "/sample_count", "does not match plan.measured_pairs");
+        }
+        if (!requiredBoolean(phase, path + "/all_samples_verified", source)) {
+            throw invalid(source, path + "/all_samples_verified", "must be true");
+        }
+
+        final JsonArray samples = requiredArray(phase, path + "/samples", source);
+        if (samples.size() != sampleCount) {
+            throw invalid(source, path + "/samples", "length does not match sample_count");
+        }
+        final long[] submissionNanos = new long[sampleCount];
+        final long[] barrierNanos = new long[sampleCount];
+        final long[] completionNanos = new long[sampleCount];
+        for (int index = 0; index < samples.size(); ++index) {
+            final String samplePath = path + "/samples/" + index;
+            final JsonObject sample = requiredObject(samples.get(index), samplePath, source);
+            if (requiredInt(sample, samplePath + "/ordinal", source) != index) {
+                throw invalid(source, samplePath + "/ordinal", "must equal its zero-based array index");
+            }
+            submissionNanos[index] = nonNegativeLong(sample, samplePath + "/submission_nanos", source);
+            barrierNanos[index] = nonNegativeLong(sample, samplePath + "/barrier_nanos", source);
+            completionNanos[index] = nonNegativeLong(sample, samplePath + "/completion_nanos", source);
+            final long timedComponents =
+                    safeAdd(submissionNanos[index], barrierNanos[index], source, samplePath + "/completion_nanos");
+            if (completionNanos[index] < timedComponents) {
+                throw invalid(
+                        source, samplePath + "/completion_nanos", "is less than submission_nanos + barrier_nanos");
+            }
+            if ("vanilla".equals(engine) && barrierNanos[index] != 0) {
+                throw invalid(source, samplePath + "/barrier_nanos", "must be zero for the vanilla_inline adapter");
+            }
+            if (!requiredBoolean(sample, samplePath + "/light_verified", source)) {
+                throw invalid(source, samplePath + "/light_verified", "must be true");
+            }
+        }
+
+        validateDistribution(
+                requiredObject(phase, path + "/submission_summary_nanos", source),
+                path + "/submission_summary_nanos",
+                source,
+                submissionNanos);
+        validateDistribution(
+                requiredObject(phase, path + "/barrier_summary_nanos", source),
+                path + "/barrier_summary_nanos",
+                source,
+                barrierNanos);
+        validateDistribution(
+                requiredObject(phase, path + "/completion_summary_nanos", source),
+                path + "/completion_summary_nanos",
+                source,
+                completionNanos);
+        return new UpdatePhase(
+                expected.name,
+                expected.lightType,
+                expected.action,
+                position,
+                submissionNanos,
+                barrierNanos,
+                completionNanos);
     }
 
     private static void validateSquarePlan(final JsonObject square, final String path, final Path source)
@@ -648,19 +1162,31 @@ final class BenchmarkComparison {
         final Run reference = runs.get(0);
         for (int index = 1; index < runs.size(); ++index) {
             final Run candidate = runs.get(index);
-            for (final String path : STRICT_PATHS) {
-                final JsonElement expected = valueAt(reference.root, path);
-                final JsonElement actual = valueAt(candidate.root, path);
-                if (!expected.equals(actual)) {
-                    mismatches.add(reference.label() + " vs " + candidate.label() + ": " + path + " is "
-                            + renderValue(expected) + " vs " + renderValue(actual));
-                }
+            compareStrictPaths(reference, candidate, COMMON_STRICT_PATHS, mismatches);
+            if (reference.mode.equals(candidate.mode)) {
+                compareStrictPaths(
+                        reference,
+                        candidate,
+                        "updates".equals(reference.mode) ? UPDATE_STRICT_PATHS : CHUNK_STRICT_PATHS,
+                        mismatches);
+                comparePhaseLayout(reference, candidate, mismatches);
             }
-            comparePhaseLayout(reference, candidate, mismatches);
             compareMods(reference, candidate, ignoredModIds, mismatches);
         }
         compareRepeatedEngineBuilds(runs, mismatches);
         return mismatches;
+    }
+
+    private static void compareStrictPaths(
+            final Run reference, final Run candidate, final List<String> paths, final List<String> mismatches) {
+        for (final String path : paths) {
+            final JsonElement expected = valueAt(reference.root, path);
+            final JsonElement actual = valueAt(candidate.root, path);
+            if (!expected.equals(actual)) {
+                mismatches.add(reference.label() + " vs " + candidate.label() + ": " + path + " is "
+                        + renderValue(expected) + " vs " + renderValue(actual));
+            }
+        }
     }
 
     private static void compareRepeatedEngineBuilds(final List<Run> runs, final List<String> mismatches) {
@@ -690,6 +1216,10 @@ final class BenchmarkComparison {
         if (expectedPhases.size() != actualPhases.size()) {
             mismatches.add(reference.label() + " vs " + candidate.label() + ": /benchmark/phases length is "
                     + expectedPhases.size() + " vs " + actualPhases.size());
+            return;
+        }
+        if ("updates".equals(reference.mode)) {
+            compareUpdatePhaseLayout(reference, candidate, expectedPhases, actualPhases, mismatches);
             return;
         }
         final String[] layoutFields = {"name", "chunk_count", "region_count", "batch_count", "batch_limit"};
@@ -724,6 +1254,28 @@ final class BenchmarkComparison {
                     candidate,
                     phaseIndex,
                     mismatches);
+        }
+    }
+
+    private static void compareUpdatePhaseLayout(
+            final Run reference,
+            final Run candidate,
+            final JsonArray expectedPhases,
+            final JsonArray actualPhases,
+            final List<String> mismatches) {
+        final String[] layoutFields = {
+            "name", "light_type", "action", "position", "sample_count", "all_samples_verified"
+        };
+        for (int phaseIndex = 0; phaseIndex < expectedPhases.size(); ++phaseIndex) {
+            final JsonObject expected = expectedPhases.get(phaseIndex).getAsJsonObject();
+            final JsonObject actual = actualPhases.get(phaseIndex).getAsJsonObject();
+            for (final String field : layoutFields) {
+                if (!expected.get(field).equals(actual.get(field))) {
+                    mismatches.add(reference.label() + " vs " + candidate.label() + ": /benchmark/phases/"
+                            + phaseIndex + "/" + field + " is " + renderValue(expected.get(field)) + " vs "
+                            + renderValue(actual.get(field)));
+                }
+            }
         }
     }
 
@@ -987,6 +1539,40 @@ final class BenchmarkComparison {
         }
     }
 
+    private static NullableMeasurement nullableNonNegativeLong(
+            final JsonObject root, final String pointer, final Path source) throws InvalidResultException {
+        final JsonElement element = required(root, pointer, source);
+        if (element.isJsonNull()) {
+            return new NullableMeasurement(false, null);
+        }
+        return new NullableMeasurement(true, nonNegativeLong(root, pointer, source));
+    }
+
+    private static void requireStringValue(
+            final JsonObject root, final String pointer, final String expected, final Path source)
+            throws InvalidResultException {
+        final String actual = requiredString(root, pointer, source);
+        if (!expected.equals(actual)) {
+            throw invalid(source, pointer, "must be " + expected);
+        }
+    }
+
+    private static void requireIntValue(
+            final JsonObject root, final String pointer, final int expected, final Path source)
+            throws InvalidResultException {
+        if (requiredInt(root, pointer, source) != expected) {
+            throw invalid(source, pointer, "must be " + expected);
+        }
+    }
+
+    private static void requireBooleanValue(
+            final JsonObject root, final String pointer, final boolean expected, final Path source)
+            throws InvalidResultException {
+        if (requiredBoolean(root, pointer, source) != expected) {
+            throw invalid(source, pointer, "must be " + expected);
+        }
+    }
+
     private static int[] requiredCoordinate(final JsonObject root, final String pointer, final Path source)
             throws InvalidResultException {
         final JsonArray coordinate = requiredArray(root, pointer, source);
@@ -995,6 +1581,31 @@ final class BenchmarkComparison {
         }
         final int[] result = new int[2];
         for (int index = 0; index < 2; ++index) {
+            final JsonElement value = coordinate.get(index);
+            try {
+                if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
+                    throw invalid(source, pointer + "/" + index, "must be a JSON integer");
+                }
+                final String literal = value.getAsString();
+                if (literal.indexOf('.') >= 0 || literal.indexOf('e') >= 0 || literal.indexOf('E') >= 0) {
+                    throw invalid(source, pointer + "/" + index, "must be a JSON integer");
+                }
+                result[index] = Integer.parseInt(literal);
+            } catch (final NumberFormatException | IllegalStateException e) {
+                throw invalid(source, pointer + "/" + index, "must be a 32-bit JSON integer");
+            }
+        }
+        return result;
+    }
+
+    private static int[] requiredBlockCoordinate(final JsonObject root, final String pointer, final Path source)
+            throws InvalidResultException {
+        final JsonArray coordinate = requiredArray(root, pointer, source);
+        if (coordinate.size() != 3) {
+            throw invalid(source, pointer, "must contain exactly three integer block coordinates");
+        }
+        final int[] result = new int[3];
+        for (int index = 0; index < result.length; ++index) {
             final JsonElement value = coordinate.get(index);
             try {
                 if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isNumber()) {
@@ -1062,6 +1673,9 @@ final class BenchmarkComparison {
         }
 
         String renderCsv() {
+            if ("updates".equals(this.runs.get(0).mode)) {
+                return renderUpdateCsv();
+            }
             final StringBuilder output = new StringBuilder();
             output.append("run,source_file,engine,started_at_utc,mode,seed,dimension_id,chunk_count,batch_count,")
                     .append("total_nanos,provide_nanos,barrier_nanos,worker_cpu_nanos,chunks_per_second,")
@@ -1097,7 +1711,62 @@ final class BenchmarkComparison {
             return output.toString();
         }
 
+        private String renderUpdateCsv() {
+            final StringBuilder output = new StringBuilder();
+            output.append("run,source_file,engine,started_at_utc,mode,seed,dimension_id,phase,light_type,action,")
+                    .append("position_x,position_y,position_z,sample_count,completion_average_nanos,")
+                    .append("completion_p50_nanos,completion_p95_nanos,completion_p99_nanos,completion_max_nanos,")
+                    .append("submission_average_nanos,submission_p50_nanos,submission_p95_nanos,")
+                    .append("submission_p99_nanos,submission_max_nanos,barrier_average_nanos,barrier_p50_nanos,")
+                    .append("barrier_p95_nanos,barrier_p99_nanos,barrier_max_nanos,")
+                    .append("pulsar_worker_cpu_nanos_all_phases,")
+                    .append("gc_collection_count_delta,gc_collection_time_millis_delta\n");
+            final Map<String, Integer> engineOrdinals = new TreeMap<>();
+            for (final Run run : this.runs) {
+                final int ordinal = engineOrdinals.merge(run.engine, 1, Integer::sum);
+                final String runName = run.engine + "-" + ordinal;
+                for (final UpdatePhase phase : run.updatePhases) {
+                    appendCsv(output, runName);
+                    appendCsv(output, run.source.getFileName().toString());
+                    appendCsv(output, run.engine);
+                    appendCsv(output, run.startedAtUtc);
+                    appendCsv(output, run.mode);
+                    appendCsv(output, run.seed);
+                    appendCsv(output, Integer.toString(run.dimensionId));
+                    appendCsv(output, phase.name);
+                    appendCsv(output, phase.lightType);
+                    appendCsv(output, phase.action);
+                    appendCsv(output, Integer.toString(phase.position[0]));
+                    appendCsv(output, Integer.toString(phase.position[1]));
+                    appendCsv(output, Integer.toString(phase.position[2]));
+                    appendCsv(output, Integer.toString(phase.sampleCount()));
+                    appendCsv(output, decimalNanos(phase.completionAverage()));
+                    appendCsv(output, Long.toString(phase.completionPercentile(0.50)));
+                    appendCsv(output, Long.toString(phase.completionPercentile(0.95)));
+                    appendCsv(output, Long.toString(phase.completionPercentile(0.99)));
+                    appendCsv(output, Long.toString(phase.completionMaximum()));
+                    appendCsv(output, decimalNanos(phase.submissionAverage()));
+                    appendCsv(output, Long.toString(phase.submissionPercentile(0.50)));
+                    appendCsv(output, Long.toString(phase.submissionPercentile(0.95)));
+                    appendCsv(output, Long.toString(phase.submissionPercentile(0.99)));
+                    appendCsv(output, Long.toString(phase.submissionMaximum()));
+                    appendCsv(output, decimalNanos(phase.barrierAverage()));
+                    appendCsv(output, Long.toString(phase.barrierPercentile(0.50)));
+                    appendCsv(output, Long.toString(phase.barrierPercentile(0.95)));
+                    appendCsv(output, Long.toString(phase.barrierPercentile(0.99)));
+                    appendCsv(output, Long.toString(phase.barrierMaximum()));
+                    appendCsv(output, nullableLong(run.updateWorkerCpuNanos));
+                    appendCsv(output, nullableLong(run.gcCollectionCountDelta));
+                    appendCsv(output, nullableLong(run.gcCollectionTimeMillisDelta), true);
+                }
+            }
+            return output.toString();
+        }
+
         String renderMarkdown() {
+            if ("updates".equals(this.runs.get(0).mode)) {
+                return renderUpdateMarkdown();
+            }
             final Run reference = this.runs.get(0);
             final StringBuilder output = new StringBuilder();
             output.append("# Lightbench comparison\n\n")
@@ -1209,6 +1878,143 @@ final class BenchmarkComparison {
             return output.toString();
         }
 
+        private String renderUpdateMarkdown() {
+            final Run reference = this.runs.get(0);
+            final JsonObject plan = valueAt(reference.root, "/benchmark/plan").getAsJsonObject();
+            final JsonObject platform = plan.getAsJsonObject("platform");
+            final StringBuilder output = new StringBuilder();
+            output.append("# Lightbench light-update comparison\n\n")
+                    .append("All ")
+                    .append(this.runs.size())
+                    .append(" result files passed schema, fixed-protocol, raw-sample and per-edit correctness ")
+                    .append("validation. Strict comparison found matching plans, seed, dimension, server/runtime ")
+                    .append(
+                            "environment, world settings, controlled preflight, config fingerprint and non-engine mods.\n\n")
+                    .append("- Mode: `updates`\n- Seed: `")
+                    .append(markdown(reference.seed))
+                    .append("`\n- Dimension: `")
+                    .append(reference.dimensionId)
+                    .append("`\n- Controlled platform: ")
+                    .append(platform.get("size_x").getAsInt())
+                    .append("x")
+                    .append(platform.get("size_z").getAsInt())
+                    .append(" stone blocks at y=")
+                    .append(platform.get("top_y").getAsInt())
+                    .append("\n- Warmup: ")
+                    .append(plan.get("warmup_pairs").getAsInt())
+                    .append(" pairs per workload\n- Measured samples: ")
+                    .append(plan.get("measured_pairs").getAsInt())
+                    .append(
+                            " per phase\n- Primary metric: completion time from immediately before the block edit until ")
+                    .append(
+                            "the engine-specific server-light completion barrier returns\n- Engine mod IDs excluded from ")
+                    .append("mod-list equality: ")
+                    .append(this.ignoredModIds.isEmpty() ? "none" : backtickList(this.ignoredModIds))
+                    .append("\n- Aggregate medians use Lightbench's nearest-rank definition across runs.\n\n")
+                    .append("## Engine summary\n");
+
+            final Map<String, List<Run>> grouped = groupedRuns();
+            for (final String phaseName : UPDATE_PHASE_NAMES) {
+                output.append("\n### `")
+                        .append(phaseName)
+                        .append("`\n\n")
+                        .append("| Engine | Runs | Median completion p50 (ms) | p50 range (ms) | ")
+                        .append("Median p95 (ms) | Median p99 (ms) | vs vanilla |\n")
+                        .append("|---|---:|---:|---:|---:|---:|---:|\n");
+                final Long vanillaMedian = grouped.containsKey("vanilla")
+                        ? medianUpdatePercentile(grouped.get("vanilla"), phaseName, 0.50)
+                        : null;
+                for (final Map.Entry<String, List<Run>> entry : grouped.entrySet()) {
+                    final List<Run> engineRuns = entry.getValue();
+                    final long medianP50 = medianUpdatePercentile(engineRuns, phaseName, 0.50);
+                    final long minimumP50 = engineRuns.stream()
+                            .mapToLong(run -> run.updatePhase(phaseName).completionPercentile(0.50))
+                            .min()
+                            .orElseThrow(AssertionError::new);
+                    final long maximumP50 = engineRuns.stream()
+                            .mapToLong(run -> run.updatePhase(phaseName).completionPercentile(0.50))
+                            .max()
+                            .orElseThrow(AssertionError::new);
+                    output.append("| ")
+                            .append(markdown(entry.getKey()))
+                            .append(" | ")
+                            .append(engineRuns.size())
+                            .append(" | ")
+                            .append(milliseconds(medianP50))
+                            .append(" | ")
+                            .append(milliseconds(minimumP50))
+                            .append("–")
+                            .append(milliseconds(maximumP50))
+                            .append(" | ")
+                            .append(milliseconds(medianUpdatePercentile(engineRuns, phaseName, 0.95)))
+                            .append(" | ")
+                            .append(milliseconds(medianUpdatePercentile(engineRuns, phaseName, 0.99)))
+                            .append(" | ")
+                            .append(speedRatio(vanillaMedian, medianP50))
+                            .append(" |\n");
+                }
+            }
+
+            output.append("\n## Individual phase results\n\n")
+                    .append("| Run | Source file | Engine | Phase | Completion p50 (ms) | Completion p95 (ms) | ")
+                    .append("Completion p99 (ms) | Completion max (ms) | Submission p50 (ms) | Barrier p50 (ms) |\n")
+                    .append("|---|---|---|---|---:|---:|---:|---:|---:|---:|\n");
+            final Map<String, Integer> engineOrdinals = new TreeMap<>();
+            final Map<Run, String> runNames = new LinkedHashMap<>();
+            for (final Run run : this.runs) {
+                final String runName = run.engine + "-" + engineOrdinals.merge(run.engine, 1, Integer::sum);
+                runNames.put(run, runName);
+                for (final UpdatePhase phase : run.updatePhases) {
+                    output.append("| ")
+                            .append(markdown(runName))
+                            .append(" | ")
+                            .append(markdown(run.source.getFileName().toString()))
+                            .append(" | ")
+                            .append(markdown(run.engine))
+                            .append(" | ")
+                            .append(markdown(phase.name))
+                            .append(" | ")
+                            .append(milliseconds(phase.completionPercentile(0.50)))
+                            .append(" | ")
+                            .append(milliseconds(phase.completionPercentile(0.95)))
+                            .append(" | ")
+                            .append(milliseconds(phase.completionPercentile(0.99)))
+                            .append(" | ")
+                            .append(milliseconds(phase.completionMaximum()))
+                            .append(" | ")
+                            .append(milliseconds(phase.submissionPercentile(0.50)))
+                            .append(" | ")
+                            .append(milliseconds(phase.barrierPercentile(0.50)))
+                            .append(" |\n");
+                }
+            }
+
+            output.append("\n## Run-level observations\n\n")
+                    .append(
+                            "| Run | Measurement GC collections | Measurement GC time (ms) | Pulsar worker CPU (ms) |\n")
+                    .append("|---|---:|---:|---:|\n");
+            for (final Run run : this.runs) {
+                output.append("| ")
+                        .append(markdown(runNames.get(run)))
+                        .append(" | ")
+                        .append(nullableLongOrNa(run.gcCollectionCountDelta))
+                        .append(" | ")
+                        .append(nullableLongOrNa(run.gcCollectionTimeMillisDelta))
+                        .append(" | ")
+                        .append(run.updateWorkerCpuNanos == null ? "n/a" : milliseconds(run.updateWorkerCpuNanos))
+                        .append(" |\n");
+            }
+            output.append("\nCompletion is the primary cross-engine metric. Submission and barrier columns are ")
+                    .append(
+                            "diagnostics: engines divide the same end-to-end interval differently, and vanilla performs ")
+                    .append(
+                            "lighting inline with a zero-duration completion adapter. GC and worker CPU are observations, ")
+                    .append("not compatibility conditions. The CSV beside this file contains raw-derived nanosecond ")
+                    .append("metrics for every phase. Aggregates are descriptive summaries, not confidence intervals; ")
+                    .append("keep the validated JSON files and individual runs when publishing results.\n");
+            return output.toString();
+        }
+
         int runCount() {
             return this.runs.size();
         }
@@ -1225,6 +2031,15 @@ final class BenchmarkComparison {
         private static long medianTotals(final List<Run> runs) {
             return nearestRank(
                     runs.stream().mapToLong(run -> run.test.totalNanos).toArray(), 0.50);
+        }
+
+        private static long medianUpdatePercentile(
+                final List<Run> runs, final String phaseName, final double sampleQuantile) {
+            return nearestRank(
+                    runs.stream()
+                            .mapToLong(run -> run.updatePhase(phaseName).completionPercentile(sampleQuantile))
+                            .toArray(),
+                    0.50);
         }
 
         private static long nearestRank(final long[] values, final double quantile) {
@@ -1247,6 +2062,25 @@ final class BenchmarkComparison {
 
         private static String milliseconds(final long nanos) {
             return String.format(Locale.ROOT, "%.3f", nanos * 1.0e-6);
+        }
+
+        private static String decimalNanos(final double nanos) {
+            return String.format(Locale.ROOT, "%.6f", nanos);
+        }
+
+        private static String nullableLong(final Long value) {
+            return value == null ? "" : Long.toString(value);
+        }
+
+        private static String nullableLongOrNa(final Long value) {
+            return value == null ? "n/a" : Long.toString(value);
+        }
+
+        private static String speedRatio(final Long vanillaMedian, final long engineMedian) {
+            if (vanillaMedian == null || vanillaMedian <= 0 || engineMedian <= 0) {
+                return "n/a";
+            }
+            return String.format(Locale.ROOT, "%.2fx", vanillaMedian / (double) engineMedian);
         }
 
         private static String markdown(final String value) {
@@ -1286,6 +2120,75 @@ final class BenchmarkComparison {
         }
     }
 
+    private static final class NullableMeasurement {
+
+        private final boolean present;
+        private final Long value;
+
+        private NullableMeasurement(final boolean present, final Long value) {
+            this.present = present;
+            this.value = value;
+        }
+    }
+
+    private static final class UpdatePlan {
+
+        private final int measuredPairs;
+        private final int baseX;
+        private final int baseZ;
+        private final int sizeX;
+        private final int sizeZ;
+        private final int topY;
+        private final int chunkHalo;
+        private final int floorY;
+        private final String floorBlock;
+        private final String floorState;
+        private final int floorMeta;
+        private final List<UpdatePhaseSpec> phases;
+
+        private UpdatePlan(
+                final int measuredPairs,
+                final int baseX,
+                final int baseZ,
+                final int sizeX,
+                final int sizeZ,
+                final int topY,
+                final int chunkHalo,
+                final int floorY,
+                final String floorBlock,
+                final String floorState,
+                final int floorMeta,
+                final List<UpdatePhaseSpec> phases) {
+            this.measuredPairs = measuredPairs;
+            this.baseX = baseX;
+            this.baseZ = baseZ;
+            this.sizeX = sizeX;
+            this.sizeZ = sizeZ;
+            this.topY = topY;
+            this.chunkHalo = chunkHalo;
+            this.floorY = floorY;
+            this.floorBlock = floorBlock;
+            this.floorState = floorState;
+            this.floorMeta = floorMeta;
+            this.phases = Collections.unmodifiableList(new ArrayList<>(phases));
+        }
+    }
+
+    private static final class UpdatePhaseSpec {
+
+        private final String name;
+        private final String lightType;
+        private final String action;
+        private final int[] position;
+
+        private UpdatePhaseSpec(final String name, final String lightType, final String action, final int[] position) {
+            this.name = name;
+            this.lightType = lightType;
+            this.action = action;
+            this.position = position.clone();
+        }
+    }
+
     private static final class Run {
 
         private final Path source;
@@ -1297,6 +2200,10 @@ final class BenchmarkComparison {
         private final String seed;
         private final int dimensionId;
         private final Phase test;
+        private final List<UpdatePhase> updatePhases;
+        private final Long updateWorkerCpuNanos;
+        private final Long gcCollectionCountDelta;
+        private final Long gcCollectionTimeMillisDelta;
 
         private Run(
                 final Path source,
@@ -1307,7 +2214,11 @@ final class BenchmarkComparison {
                 final String startedAtUtc,
                 final String seed,
                 final int dimensionId,
-                final Phase test) {
+                final Phase test,
+                final List<UpdatePhase> updatePhases,
+                final Long updateWorkerCpuNanos,
+                final Long gcCollectionCountDelta,
+                final Long gcCollectionTimeMillisDelta) {
             this.source = source;
             this.root = root;
             this.mods = mods;
@@ -1317,10 +2228,108 @@ final class BenchmarkComparison {
             this.seed = seed;
             this.dimensionId = dimensionId;
             this.test = test;
+            this.updatePhases = Collections.unmodifiableList(new ArrayList<>(updatePhases));
+            this.updateWorkerCpuNanos = updateWorkerCpuNanos;
+            this.gcCollectionCountDelta = gcCollectionCountDelta;
+            this.gcCollectionTimeMillisDelta = gcCollectionTimeMillisDelta;
         }
 
         private String label() {
             return this.source.getFileName() + " (" + this.engine + ")";
+        }
+
+        private UpdatePhase updatePhase(final String name) {
+            for (final UpdatePhase phase : this.updatePhases) {
+                if (name.equals(phase.name)) {
+                    return phase;
+                }
+            }
+            throw new AssertionError("validated update phase is missing: " + name);
+        }
+    }
+
+    private static final class UpdatePhase {
+
+        private final String name;
+        private final String lightType;
+        private final String action;
+        private final int[] position;
+        private final long[] sortedSubmissionNanos;
+        private final long[] sortedBarrierNanos;
+        private final long[] sortedCompletionNanos;
+        private final long submissionSumNanos;
+        private final long barrierSumNanos;
+        private final long completionSumNanos;
+
+        private UpdatePhase(
+                final String name,
+                final String lightType,
+                final String action,
+                final int[] position,
+                final long[] submissionNanos,
+                final long[] barrierNanos,
+                final long[] completionNanos) {
+            this.name = name;
+            this.lightType = lightType;
+            this.action = action;
+            this.position = position.clone();
+            this.sortedSubmissionNanos = submissionNanos.clone();
+            this.sortedBarrierNanos = barrierNanos.clone();
+            this.sortedCompletionNanos = completionNanos.clone();
+            Arrays.sort(this.sortedSubmissionNanos);
+            Arrays.sort(this.sortedBarrierNanos);
+            Arrays.sort(this.sortedCompletionNanos);
+            this.submissionSumNanos = sum(this.sortedSubmissionNanos);
+            this.barrierSumNanos = sum(this.sortedBarrierNanos);
+            this.completionSumNanos = sum(this.sortedCompletionNanos);
+        }
+
+        private int sampleCount() {
+            return this.sortedCompletionNanos.length;
+        }
+
+        private double submissionAverage() {
+            return this.submissionSumNanos / (double) sampleCount();
+        }
+
+        private double barrierAverage() {
+            return this.barrierSumNanos / (double) sampleCount();
+        }
+
+        private double completionAverage() {
+            return this.completionSumNanos / (double) sampleCount();
+        }
+
+        private long submissionPercentile(final double quantile) {
+            return percentile(this.sortedSubmissionNanos, quantile);
+        }
+
+        private long barrierPercentile(final double quantile) {
+            return percentile(this.sortedBarrierNanos, quantile);
+        }
+
+        private long completionPercentile(final double quantile) {
+            return percentile(this.sortedCompletionNanos, quantile);
+        }
+
+        private long submissionMaximum() {
+            return this.sortedSubmissionNanos[this.sortedSubmissionNanos.length - 1];
+        }
+
+        private long barrierMaximum() {
+            return this.sortedBarrierNanos[this.sortedBarrierNanos.length - 1];
+        }
+
+        private long completionMaximum() {
+            return this.sortedCompletionNanos[this.sortedCompletionNanos.length - 1];
+        }
+
+        private static long sum(final long[] values) {
+            long result = 0;
+            for (final long value : values) {
+                result = Math.addExact(result, value);
+            }
+            return result;
         }
     }
 
