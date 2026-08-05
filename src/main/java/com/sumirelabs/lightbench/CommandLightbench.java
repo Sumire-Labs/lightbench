@@ -58,6 +58,7 @@ public class CommandLightbench extends CommandBase {
     @Override
     public String getUsage(final ICommandSender sender) {
         return "/lightbench gen | /lightbench bulk [radius] [warmupRadius]"
+                + " | /lightbench updates"
                 + " | /lightbench edits [size] [reps]"
                 + " | /lightbench tps <editsPerTick> [seconds] | /lightbench tps sweep [seconds]"
                 + " | /lightbench spikes [editsPerSec] [seconds]";
@@ -75,6 +76,22 @@ public class CommandLightbench extends CommandBase {
         final LightProbe probe = LightProbe.create(world);
 
         try {
+            if (args.length > 0 && "updates".equalsIgnoreCase(args[0])) {
+                if (args.length > 1) {
+                    throw new WrongUsageException(getUsage(sender));
+                }
+                if (TpsTest.isRunning() || SpikeTest.isRunning()) {
+                    say(sender, "a tick-measured run is already in progress");
+                    return;
+                }
+                say(
+                        sender,
+                        "engine: " + probe.engine().name().toLowerCase(Locale.ROOT)
+                                + " | mode: updates | 20 warmup + 200 measured pairs per workload");
+                UpdateBenchmark.run(sender, world, probe);
+                return;
+            }
+
             if (args.length > 0 && "spikes".equals(args[0])) {
                 if (TpsTest.isRunning() || SpikeTest.isRunning()) {
                     say(sender, "a tick-measured run is already in progress");

@@ -95,6 +95,76 @@ class BenchmarkReportTest {
     }
 
     @Test
+    void updatePhaseJsonKeepsEveryRawTimingAndVerificationMarker() {
+        final UpdatePhaseResult phase = new UpdatePhaseResult(
+                "sky_remove",
+                "sky",
+                "remove",
+                20008,
+                254,
+                20008,
+                new long[] {10, 20},
+                new long[] {90, 180},
+                new long[] {110, 220});
+
+        final JsonObject json = BenchmarkReport.updatePhaseToJson(phase);
+        assertEquals(2, json.get("sample_count").getAsInt());
+        assertTrue(json.get("all_samples_verified").getAsBoolean());
+        assertEquals(254, json.getAsJsonArray("position").get(1).getAsInt());
+        assertEquals(
+                15.0,
+                json.getAsJsonObject("submission_summary_nanos").get("average").getAsDouble());
+        assertEquals(
+                220, json.getAsJsonObject("completion_summary_nanos").get("p99").getAsLong());
+
+        final JsonObject second = json.getAsJsonArray("samples").get(1).getAsJsonObject();
+        assertEquals(1, second.get("ordinal").getAsInt());
+        assertEquals(20, second.get("submission_nanos").getAsLong());
+        assertEquals(180, second.get("barrier_nanos").getAsLong());
+        assertEquals(220, second.get("completion_nanos").getAsLong());
+        assertTrue(second.get("light_verified").getAsBoolean());
+    }
+
+    @Test
+    void updateSampleColumnsMustHaveMatchingNonEmptyLengths() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new UpdatePhaseResult(
+                        "block_place", "block", "place", 0, 1, 0, new long[] {1}, new long[0], new long[] {2}));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new UpdatePhaseResult(
+                        "block_place", "block", "place", 0, 1, 0, new long[0], new long[0], new long[0]));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> new UpdatePhaseResult(
+                        "block_place", "block", "place", 0, 1, 0, new long[] {3}, new long[] {9}, new long[] {8}));
+    }
+
+    @Test
+    void fixedUpdateSamplesStayAtLeastTwentyFourBlocksFromPlatformEdges() {
+        final int baseX = UpdateBenchmark.CENTER_X - UpdateBenchmark.PLATFORM_SIZE / 2;
+        final int baseZ = UpdateBenchmark.CENTER_Z - UpdateBenchmark.PLATFORM_SIZE / 2;
+
+        assertEquals(
+                31,
+                UpdateBenchmark.minimumEdgeMargin(
+                        UpdateBenchmark.CENTER_X,
+                        UpdateBenchmark.CENTER_Z,
+                        baseX,
+                        baseZ,
+                        UpdateBenchmark.PLATFORM_SIZE));
+        assertEquals(
+                24,
+                UpdateBenchmark.minimumEdgeMargin(
+                        UpdateBenchmark.CENTER_X - 8,
+                        UpdateBenchmark.CENTER_Z - 8,
+                        baseX,
+                        baseZ,
+                        UpdateBenchmark.PLATFORM_SIZE));
+    }
+
+    @Test
     void resultWriterPublishesCompleteFilesWithoutOverwritingEarlierRuns(@TempDir final Path temporary)
             throws Exception {
         final Path directory = temporary.resolve("results");

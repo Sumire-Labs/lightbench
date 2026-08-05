@@ -173,6 +173,74 @@ final class BenchmarkReport {
         return writeUniqueJson(directory, prefix, json);
     }
 
+    static Path writeUpdates(
+            final World world,
+            final LightProbe.Engine engine,
+            final String startedAtUtc,
+            final String completionAdapter,
+            final String verificationReader,
+            final JsonObject preflight,
+            final Plan plan,
+            final List<UpdatePhaseResult> phases,
+            final long workerCpuNanos,
+            final long gcCollectionsDelta,
+            final long gcTimeMillisDelta)
+            throws IOException {
+        final JsonObject root = new JsonObject();
+        root.addProperty("schema_version", SCHEMA_VERSION);
+
+        final JsonObject benchmark = new JsonObject();
+        benchmark.addProperty("mode", "updates");
+        benchmark.addProperty("started_at_utc", startedAtUtc);
+        benchmark.addProperty("completed_at_utc", nowUtc());
+        benchmark.addProperty("lightbench_version", Tags.VERSION);
+        benchmark.addProperty("engine", engine.name().toLowerCase(Locale.ROOT));
+        benchmark.addProperty("seed", Long.toString(world.getSeed()));
+        benchmark.addProperty("time_unit", "nanoseconds");
+        benchmark.addProperty("reporting_excluded_from_measurements", true);
+        benchmark.addProperty("completion_adapter", completionAdapter);
+        benchmark.addProperty("verification_reader", verificationReader);
+
+        final JsonObject dimension = new JsonObject();
+        dimension.addProperty("id", world.provider.getDimension());
+        dimension.addProperty("name", world.provider.getDimensionType().getName());
+        dimension.addProperty("provider_class", world.provider.getClass().getName());
+        dimension.addProperty("has_sky_light", world.provider.hasSkyLight());
+        benchmark.add("dimension", dimension);
+        benchmark.add("preflight", preflight);
+        benchmark.add("plan", plan.json);
+
+        final JsonObject measurementGc = new JsonObject();
+        if (gcCollectionsDelta >= 0 && gcTimeMillisDelta >= 0) {
+            measurementGc.addProperty("collection_count_delta", gcCollectionsDelta);
+            measurementGc.addProperty("collection_time_millis_delta", gcTimeMillisDelta);
+        } else {
+            measurementGc.add("collection_count_delta", JsonNull.INSTANCE);
+            measurementGc.add("collection_time_millis_delta", JsonNull.INSTANCE);
+        }
+        benchmark.add("measurement_gc", measurementGc);
+        if (workerCpuNanos >= 0) {
+            benchmark.addProperty("pulsar_worker_cpu_nanos", workerCpuNanos);
+        } else {
+            benchmark.add("pulsar_worker_cpu_nanos", JsonNull.INSTANCE);
+        }
+
+        final JsonArray phaseArray = new JsonArray();
+        for (final UpdatePhaseResult phase : phases) {
+            phaseArray.add(updatePhaseToJson(phase));
+        }
+        benchmark.add("phases", phaseArray);
+        root.add("benchmark", benchmark);
+        root.add("environment", environmentToJson(world));
+        root.add("mods", modsToJson());
+
+        final Path directory =
+                world.getSaveHandler().getWorldDirectory().toPath().resolve("lightbench-results");
+        final String prefix = FILE_TIME.format(Instant.now()) + "-updates-"
+                + engine.name().toLowerCase(Locale.ROOT) + "-dim" + world.provider.getDimension();
+        return writeUniqueJson(directory, prefix, serializeJson(root));
+    }
+
     static byte[] serializeJson(final JsonObject root) {
         return (GSON.toJson(root) + System.lineSeparator()).getBytes(StandardCharsets.UTF_8);
     }
@@ -245,6 +313,32 @@ final class BenchmarkReport {
         return json;
     }
 
+    static JsonObject updatePhaseToJson(final UpdatePhaseResult phase) {
+        final JsonObject json = new JsonObject();
+        json.addProperty("name", phase.name);
+        json.addProperty("light_type", phase.lightType);
+        json.addProperty("action", phase.action);
+        json.add("position", coordinate(phase.x, phase.y, phase.z));
+        json.addProperty("sample_count", phase.size());
+        json.addProperty("all_samples_verified", true);
+        json.add("submission_summary_nanos", distribution(phase.submissionNanos));
+        json.add("barrier_summary_nanos", distribution(phase.barrierNanos));
+        json.add("completion_summary_nanos", distribution(phase.completionNanos));
+
+        final JsonArray samples = new JsonArray();
+        for (int index = 0; index < phase.size(); ++index) {
+            final JsonObject sample = new JsonObject();
+            sample.addProperty("ordinal", index);
+            sample.addProperty("submission_nanos", phase.submissionNanos[index]);
+            sample.addProperty("barrier_nanos", phase.barrierNanos[index]);
+            sample.addProperty("completion_nanos", phase.completionNanos[index]);
+            sample.addProperty("light_verified", true);
+            samples.add(sample);
+        }
+        json.add("samples", samples);
+        return json;
+    }
+
     private static JsonObject environmentToJson(final World world) {
         final JsonObject environment = new JsonObject();
         environment.addProperty("minecraft_version", ForgeVersion.mcVersion);
@@ -291,6 +385,18 @@ final class BenchmarkReport {
         worldSettings.addProperty("map_features", world.getWorldInfo().isMapFeaturesEnabled());
         worldSettings.addProperty("difficulty", world.getDifficulty().name().toLowerCase(Locale.ROOT));
         environment.add("world_settings", worldSettings);
+
+        final JsonObject server = new JsonObject();
+        if (world.getMinecraftServer() != null) {
+            server.addProperty("dedicated", world.getMinecraftServer().isDedicatedServer());
+            server.addProperty(
+                    "implementation_class",
+                    world.getMinecraftServer().getClass().getName());
+        } else {
+            server.add("dedicated", JsonNull.INSTANCE);
+            server.add("implementation_class", JsonNull.INSTANCE);
+        }
+        environment.add("server", server);
 
         environment.add("config_fingerprint", configFingerprint(world));
         return environment;
@@ -537,6 +643,14 @@ final class BenchmarkReport {
         return coordinate;
     }
 
+    private static JsonArray coordinate(final int x, final int y, final int z) {
+        final JsonArray coordinate = new JsonArray();
+        coordinate.add(new JsonPrimitive(x));
+        coordinate.add(new JsonPrimitive(y));
+        coordinate.add(new JsonPrimitive(z));
+        return coordinate;
+    }
+
     private static String hex(final byte[] bytes) {
         final StringBuilder result = new StringBuilder(bytes.length * 2);
         for (final byte value : bytes) {
@@ -555,7 +669,7 @@ final class BenchmarkReport {
 
         private final JsonObject json;
 
-        private Plan(final JsonObject json) {
+        Plan(final JsonObject json) {
             this.json = json;
         }
     }
