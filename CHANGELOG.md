@@ -27,6 +27,9 @@ default). The GitHub release notes are auto-generated from commits/PRs by the re
 
 - Added regression tests for the warmup size, measured-region count, chunk uniqueness, batch count and
   percentile selection.
+- Added a non-generating fresh-world preflight for `gen` and `bulk`. The command now checks every
+  target plus a one-chunk border and aborts before requesting chunks if any part of that footprint
+  already exists.
 
 ## [0.1.0]
 

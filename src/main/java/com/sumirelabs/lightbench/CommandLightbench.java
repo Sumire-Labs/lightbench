@@ -3,8 +3,10 @@ package com.sumirelabs.lightbench;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.CommandException;
 import net.minecraft.command.ICommandSender;
@@ -40,6 +42,7 @@ public class CommandLightbench extends CommandBase {
     private static final int GEN_BATCH_SIZE = 5;
     private static final int GEN_REGION_COUNT = 36;
     private static final int GEN_REGION_STRIDE = 40;
+    private static final int FRESHNESS_HALO = 1;
 
     private static final int BULK_WARMUP_CENTER = -625;
     private static final int BULK_TEST_CENTER = 625;
@@ -170,6 +173,12 @@ public class CommandLightbench extends CommandBase {
         final int warmupChunks = squareChunkCount(GEN_WARMUP_RADIUS);
         final int chunksPerRegion = squareChunkCount(GEN_REGION_RADIUS);
         final int measuredChunks = chunksPerRegion * GEN_REGION_COUNT;
+        final List<List<ChunkPos>> warmupRegions =
+                Collections.singletonList(createSquareRegion(GEN_WARMUP_CENTER, GEN_WARMUP_CENTER, GEN_WARMUP_RADIUS));
+        final List<List<ChunkPos>> measuredRegions = createGenerationTestRegions();
+        final List<List<ChunkPos>> allRegions = new ArrayList<>(1 + measuredRegions.size());
+        allRegions.addAll(warmupRegions);
+        allRegions.addAll(measuredRegions);
 
         say(
                 sender,
@@ -180,13 +189,13 @@ public class CommandLightbench extends CommandBase {
                 sender,
                 "gen plan: warmup " + warmupChunks + " chunks at -10000; test " + GEN_REGION_COUNT + " x "
                         + chunksPerRegion + " = " + measuredChunks + " chunks from +10000");
+        if (!requireFreshFootprint(sender, provider, allRegions)) {
+            return;
+        }
 
-        final List<List<ChunkPos>> warmupRegions =
-                Collections.singletonList(createSquareRegion(GEN_WARMUP_CENTER, GEN_WARMUP_CENTER, GEN_WARMUP_RADIUS));
         runBatchedRegions(sender, world, probe, "gen warmup", warmupRegions, GEN_BATCH_SIZE);
         queueUnloadRegions(provider, warmupRegions);
 
-        final List<List<ChunkPos>> measuredRegions = createGenerationTestRegions();
         runBatchedRegions(sender, world, probe, "gen test", measuredRegions, GEN_BATCH_SIZE);
         queueUnloadRegions(provider, measuredRegions);
     }
@@ -198,6 +207,13 @@ public class CommandLightbench extends CommandBase {
             final int radius,
             final int warmupRadius)
             throws Exception {
+        final IChunkProvider provider = world.getChunkProvider();
+        final List<List<ChunkPos>> regions = new ArrayList<>(2);
+        if (warmupRadius > 0) {
+            regions.add(createSquareRegion(BULK_WARMUP_CENTER, BULK_WARMUP_CENTER, warmupRadius));
+        }
+        regions.add(createSquareRegion(BULK_TEST_CENTER, BULK_TEST_CENTER, radius));
+
         say(
                 sender,
                 "engine: " + probe.engine().name().toLowerCase(Locale.ROOT)
@@ -206,10 +222,37 @@ public class CommandLightbench extends CommandBase {
         say(
                 sender,
                 "bulk submits the complete square before one final light barrier; do not compare it as gen latency");
+        if (!requireFreshFootprint(sender, provider, regions)) {
+            return;
+        }
         if (warmupRadius > 0) {
             runBulkPhase(sender, world, probe, "bulk warmup", BULK_WARMUP_CENTER, BULK_WARMUP_CENTER, warmupRadius);
         }
         runBulkPhase(sender, world, probe, "bulk test", BULK_TEST_CENTER, BULK_TEST_CENTER, radius);
+    }
+
+    private boolean requireFreshFootprint(
+            final ICommandSender sender, final IChunkProvider provider, final List<List<ChunkPos>> regions) {
+        final List<ChunkPos> footprint = createFreshnessFootprint(regions, FRESHNESS_HALO);
+        final long start = System.nanoTime();
+        final ChunkPos existing = findFirstGeneratedChunk(provider, footprint);
+        final long elapsed = System.nanoTime() - start;
+        if (existing != null) {
+            say(
+                    sender,
+                    "preflight failed: chunk " + existing
+                            + " in the benchmark footprint already exists (the check includes a one-chunk border)");
+            say(sender, "no benchmark chunks were requested; create a fresh world before measuring generation");
+            return false;
+        }
+        say(
+                sender,
+                String.format(
+                        Locale.ROOT,
+                        "preflight: %d target-and-border chunks are ungenerated (%.3fs)",
+                        footprint.size(),
+                        elapsed * 1.0e-9));
+        return true;
     }
 
     private void runBatchedRegions(
@@ -288,6 +331,43 @@ public class CommandLightbench extends CommandBase {
             regions.add(createSpiralRegion(center, center, GEN_REGION_RADIUS));
         }
         return regions;
+    }
+
+    static List<ChunkPos> createFreshnessFootprint(final List<List<ChunkPos>> regions, final int halo) {
+        if (halo < 0) {
+            throw new IllegalArgumentException("halo must not be negative");
+        }
+        final Set<ChunkPos> footprint = new LinkedHashSet<>();
+        for (final List<ChunkPos> region : regions) {
+            if (region.isEmpty()) {
+                continue;
+            }
+            int minX = Integer.MAX_VALUE;
+            int minZ = Integer.MAX_VALUE;
+            int maxX = Integer.MIN_VALUE;
+            int maxZ = Integer.MIN_VALUE;
+            for (final ChunkPos chunk : region) {
+                minX = Math.min(minX, chunk.x);
+                minZ = Math.min(minZ, chunk.z);
+                maxX = Math.max(maxX, chunk.x);
+                maxZ = Math.max(maxZ, chunk.z);
+            }
+            for (int x = minX - halo; x <= maxX + halo; ++x) {
+                for (int z = minZ - halo; z <= maxZ + halo; ++z) {
+                    footprint.add(new ChunkPos(x, z));
+                }
+            }
+        }
+        return new ArrayList<>(footprint);
+    }
+
+    static ChunkPos findFirstGeneratedChunk(final IChunkProvider provider, final List<ChunkPos> footprint) {
+        for (final ChunkPos chunk : footprint) {
+            if (provider.isChunkGeneratedAt(chunk.x, chunk.z)) {
+                return chunk;
+            }
+        }
+        return null;
     }
 
     static List<ChunkPos> createSquareRegion(final int centerX, final int centerZ, final int radius) {

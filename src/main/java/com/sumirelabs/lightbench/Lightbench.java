@@ -32,8 +32,10 @@ import org.apache.logging.log4j.Logger;
  * separate whole-square throughput stress test.
  *
  * <p>Use a fresh world with the same fixed seed, JVM, configuration and mod
- * list for every engine pass. Reusing a world measures chunk loading rather
- * than generation.
+ * list for every engine pass. Before a generation run, the command rejects
+ * any target or one-chunk-border coordinate that the provider reports as
+ * already generated, without loading it. Reusing generated coordinates would
+ * measure chunk loading rather than generation.
  */
 @Mod(modid = Tags.ID, name = Tags.NAME, version = Tags.VERSION, acceptedMinecraftVersions = "[1.12.2]")
 public class Lightbench {

@@ -21,6 +21,8 @@ The fixed `gen` plan is:
 - Wait for the installed light engine to finish after every batch.
 - Use chunk coordinates around −10,000 for warmup and +10,000 onward for measurement. These are chunk coordinates, not block coordinates.
 
+Before any chunk is requested, Lightbench checks every target region plus a one-chunk border using the provider's non-generating existence query. If even one of those chunks is loaded, saved, or waiting to be saved, the command stops without starting the benchmark. This prevents an accidentally reused world from producing artificially low disk-load results and keeps pre-existing neighboring chunks from changing 1.12.2 population behavior.
+
 The most useful result is `gen test ... total-until-lit`. Batch and region percentiles show variance and stalls. For Pulsar, worker-thread CPU time is also reported as supplemental data; it can exceed wall time because multiple workers may run in parallel.
 
 This is intentionally a very heavy synchronous run. The game can appear frozen while it generates more than 20,000 chunks in total, and a dedicated server's watchdog limit must be long enough for the command to finish.
@@ -39,7 +41,7 @@ Other workloads are available through `/lightbench edits`, `/lightbench tps`, an
 
 For each engine under comparison:
 
-1. Create a fresh world with the same fixed seed. Do not reuse a world that has already generated the benchmark coordinates.
+1. Create a fresh world with the same fixed seed. Lightbench rejects generated chunks in the benchmark footprint, but a dedicated fresh world remains the clearest way to isolate every run.
 2. Keep the Minecraft, Forge, Java, Lightbench, world-generator, configuration and mod-list versions identical; change only the light engine.
 3. Give every run the same JVM arguments and memory allocation, and avoid other heavy work on the machine.
 4. Let the built-in warmup finish. Compare the measured `gen test` result, not the warmup result.
